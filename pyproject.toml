@@ -1,0 +1,21 @@
+[project]
+name = "property-pipeline"
+version = "0.1.0"
+description = "Automated property listing scraper for Krakow"
+authors = [
+    {name = "mkkom"}
+]
+readme = "README.md"
+requires-python = "^3.11"
+dependencies = [
+    "scrapy (>=2.14)",
+    "scrapy-impersonate (>=1.6)",
+    "scrapy-fake-useragent (>=1.3)",
+    "pillow (>=10.4)",
+    "pydantic (>=2.9)"
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
