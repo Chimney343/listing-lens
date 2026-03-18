@@ -1,38 +1,62 @@
 # property_scraper/settings.py
 
+from pathlib import Path
+
 BOT_NAME = "property_scraper"
 SPIDER_MODULES = ["property_scraper.spiders"]
 NEWSPIDER_MODULE = "property_scraper.spiders"
 
+# ─── PROJECT PATHS ──────────────────────────────────────────
+DATA_DIR = str(Path(__file__).resolve().parents[2] / "data")
+
 # ─── REACTOR (required for scrapy-impersonate) ──────────────
 TWISTED_REACTOR = "twisted.internet.asyncioreactor.AsyncioSelectorReactor"
 
-# ─── TLS FINGERPRINT SPOOFING ───────────────────────────────
+# ─── DOWNLOAD HANDLERS ──────────────────────────────────────
+# Playwright for browser-based requests.
 DOWNLOAD_HANDLERS = {
-    "http": "scrapy_impersonate.ImpersonateDownloadHandler",
-    "https": "scrapy_impersonate.ImpersonateDownloadHandler",
+    "http": "scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler",
+    "https": "scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler",
 }
 
-# ─── USER AGENT ROTATION ────────────────────────────────────
-USER_AGENT = None  # Let scrapy-impersonate set UA matching TLS profile
+# ─── PLAYWRIGHT ──────────────────────────────────────────────
+PLAYWRIGHT_BROWSER_TYPE = "chromium"
+PLAYWRIGHT_LAUNCH_OPTIONS = {
+    "headless": True,
+    "args": [
+        "--disable-blink-features=AutomationControlled",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+    ],
+}
+PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT = 30_000
+PLAYWRIGHT_CONTEXTS = {
+    "default": {
+        "user_agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "viewport": {"width": 1920, "height": 1080},
+        "locale": "pl-PL",
+        "timezone_id": "Europe/Warsaw",
+        "extra_http_headers": {
+            "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
+        },
+    }
+}
+
+# ─── USER AGENT ─────────────────────────────────────────────
+# Playwright requests use real Chromium UA automatically.
+# Non-playwright requests use this fallback.
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
 
 DOWNLOADER_MIDDLEWARES = {
     "scrapy.downloadermiddlewares.useragent.UserAgentMiddleware": None,
     "scrapy.downloadermiddlewares.retry.RetryMiddleware": None,
-    "scrapy_fake_useragent.middleware.RandomUserAgentMiddleware": 400,
-    "scrapy_fake_useragent.middleware.RetryUserAgentMiddleware": 401,
-    "scrapy_impersonate.RandomBrowserMiddleware": 1000,
 }
-
-FAKEUSERAGENT_PROVIDERS = [
-    "scrapy_fake_useragent.providers.FakeUserAgentProvider",
-    "scrapy_fake_useragent.providers.FakerProvider",
-    "scrapy_fake_useragent.providers.FixedUserAgentProvider",
-]
-FAKEUSERAGENT_FALLBACK = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-)
 
 # ─── AUTOTHROTTLE ────────────────────────────────────────────
 AUTOTHROTTLE_ENABLED = True
@@ -83,11 +107,14 @@ ROBOTSTXT_OBEY = False  # Portals block scrapers via robots.txt
 
 # ─── LOGGING ─────────────────────────────────────────────────
 LOG_LEVEL = "INFO"
+LOG_ENCODING = "utf-8"
+
+# ─── FEED EXPORT ─────────────────────────────────────────────
+FEED_EXPORT_ENCODING = "utf-8"
 
 # ─── PIPELINES ───────────────────────────────────────────────
 ITEM_PIPELINES = {
     "property_scraper.pipelines.ValidationPipeline": 100,
-    "property_scraper.pipelines.DeduplicationPipeline": 200,
     "property_scraper.pipelines.PhotoDownloadPipeline": 300,
     "property_scraper.pipelines.DatabasePipeline": 400,
 }

@@ -3,8 +3,11 @@ from dataclasses import dataclass, field
 
 @dataclass
 class SearchArea:
-    city: str = "krakow"
-    voivodeship: str = "malopolskie"
+    city: str = "mielec"
+    voivodeship: str = "podkarpackie"
+    powiat: str = "mielecki"
+    gmina: str = "gmina-miejska--mielec"
+    property_type: str = "mieszkanie"  # mieszkanie | dom | dzialka | etc.
     districts: list[str] = field(default_factory=list)  # empty = all
     price_min: int | None = None
     price_max: int | None = None
@@ -31,7 +34,10 @@ OTODOM_DISTRICT_SLUGS = {
 
 
 def build_otodom_url(area: SearchArea, page: int = 1) -> str:
-    base = f"https://www.otodom.pl/pl/wyniki/sprzedaz/mieszkanie/{area.voivodeship}/{area.city}"
+    base = (
+        f"https://www.otodom.pl/pl/wyniki/sprzedaz/{area.property_type}"
+        f"/{area.voivodeship}/{area.powiat}/{area.gmina}/{area.city}"
+    )
     params = [f"page={page}", "limit=36"]
     if area.price_min:
         params.append(f"priceMin={area.price_min}")

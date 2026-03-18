@@ -7,7 +7,6 @@ class RawListingItem(scrapy.Item):
     source_portal = Field()       # "otodom" | "gratka" | "morizon"
     source_url = Field()
     external_id = Field()         # Portal's own listing ID
-    listing_hash = Field()        # SHA-256 dedup fingerprint (set by pipeline)
 
     # ─── Headline ────────────────────────────────────────────────
     title = Field()
@@ -43,6 +42,7 @@ class RawListingItem(scrapy.Item):
     building_material = Field()
 
     # ─── Listing metadata ─────────────────────────────────────────
+    property_type = Field()       # "mieszkanie" | "dom" | etc.
     market_type = Field()         # "primary" | "secondary"
     listing_type = Field()        # "agency" | "private"
     date_posted = Field()

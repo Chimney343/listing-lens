@@ -68,6 +68,10 @@ instance/
 # Scrapy stuff:
 .scrapy
 
+# Runtime data
+data/
+scrapy_project/rejected_otodom.jsonl
+
 # Sphinx documentation
 docs/_build/
 
