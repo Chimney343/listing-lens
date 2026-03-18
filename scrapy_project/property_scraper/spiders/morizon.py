@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from property_scraper.area_config import SearchArea, build_morizon_url
 from property_scraper.items import RawListingItem
 
+_PROPERTY_TYPE_MAP = {"mieszkanie": "apartment", "dom": "house"}
+
 
 class MorizonSpider(scrapy.Spider):
     name = "morizon"
@@ -32,7 +34,8 @@ class MorizonSpider(scrapy.Spider):
 
     def __init__(
         self,
-        city: str = "krakow",
+        city: str = "mielec",
+        property_type: str = "mieszkanie",
         districts: str = "",
         price_min: str | None = None,
         price_max: str | None = None,
@@ -42,13 +45,14 @@ class MorizonSpider(scrapy.Spider):
         super().__init__(**kwargs)
         self.area = SearchArea(
             city=city,
+            property_type=property_type,
             districts=[d.strip() for d in districts.split(",") if d.strip()],
             price_min=int(price_min) if price_min else None,
             price_max=int(price_max) if price_max else None,
             max_pages=int(max_pages),
         )
 
-    def start_requests(self):
+    async def start(self):
         url = build_morizon_url(self.area, page=1)
         yield scrapy.Request(url, callback=self.parse_search, meta={"page": 1})
 
@@ -94,7 +98,7 @@ class MorizonSpider(scrapy.Spider):
         item["title"] = title
         item["description"] = description
         item["description_length"] = len(description)
-        item["city"] = "Kraków"
+        item["city"] = self.area.city.capitalize()
         item["district"] = address_parts[0].strip() if address_parts else None
         item["street"] = response.css(self.SEL_STREET).get("").strip() or None
         item["latitude"] = None
@@ -117,6 +121,7 @@ class MorizonSpider(scrapy.Spider):
         item["parking"] = params.get("Garaż / miejsce parkingowe") or params.get("Parking")
         item["building_material"] = params.get("Materiał budynku")
 
+        item["property_type"] = _PROPERTY_TYPE_MAP.get(self.area.property_type, self.area.property_type)
         item["market_type"] = params.get("Rynek")
         item["listing_type"] = None
         item["date_posted"] = params.get("Dodane")
