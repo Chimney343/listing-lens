@@ -1,0 +1,40 @@
+## Codebase Structure Analysis — codebase-memory-mcp
+
+This project has the `codebase-memory-mcp` MCP server available. It provides a knowledge graph of the codebase: functions, classes, call chains, cross-service HTTP links, all queryable via graph tools.
+
+### MANDATORY: Always use codebase-memory-mcp for structural questions
+
+When answering questions about code structure, dependencies, call chains, or architecture, you MUST use the codebase-memory-mcp tools instead of grep, file search, or manual file reading. Graph queries return precise results in a single tool call versus thousands of tokens of file-by-file exploration.
+
+### Workflow
+
+1. **Before any exploration or planning task**, ensure the graph is current:
+   - `list_projects()` to check when the project was last indexed. Reindex if it's different day than today.
+   - `index_repository(repo_path="/mnt/c/Users/mkkom/listing-lens")` — always pass the absolute path
+   - Always use repo_path="/mnt/c/Users/mkkom/listing-lens"
+   - Never ask the user for the WSL repo path
+
+2. **For structural questions, always use these tools first:**
+   - "Who calls X?" → `trace_call_path(function_name="X", direction="inbound")`
+   - "What does X call?" → `trace_call_path(function_name="X", direction="outbound")`
+   - "Show me the full call chain" → `trace_call_path(function_name="X", direction="both", depth=5)`
+   - "Find functions matching a pattern" → `search_graph(label="Function", name_pattern=".*Pattern.*")`
+   - "Find all handlers" → `search_graph(label="Function", name_pattern=".*Handler.*")`
+   - "Find dead code" → `search_graph(label="Function", relationship="CALLS", direction="inbound", max_degree=0, exclude_entry_points=true)`
+   - "Show REST routes" → `search_graph(label="Route")`
+   - "Cross-service HTTP calls" → `search_graph(relationship="HTTP_CALLS", direction="outbound")`
+   - "High fan-out functions" → `search_graph(label="Function", relationship="CALLS", direction="outbound", min_degree=10)`
+   - "Understand the schema" → `get_graph_schema()`
+   - "Read source of a function" → `get_code_snippet(qualified_name="package.Function")`
+   - "Complex multi-hop queries" → `query_graph(query="MATCH (f:Function)-[:CALLS]->(g) WHERE f.name = 'main' RETURN g.name")`
+
+3. **Only fall back to grep/file reading when:**
+   - Searching for string literals, error messages, or config values (the graph does not index text content)
+   - Reading a single specific file by path
+   - The graph has not been indexed yet and the user needs an immediate answer
+
+### Do NOT
+
+- Do not use grep, glob, or file-by-file reading for questions about call chains, dependencies, function relationships, or architecture
+- Do not guess at code structure — query the graph
+- Do not skip indexing — if `list_projects()` shows the project is stale or missing, reindex before answering structural questions
