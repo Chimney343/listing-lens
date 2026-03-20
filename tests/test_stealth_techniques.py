@@ -4,11 +4,6 @@ from unittest.mock import Mock, patch, AsyncMock
 import pytest
 from scrapy.http import TextResponse, Request
 
-# Add scrapy_project to path for imports
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent / "scrapy_project"))
-
 from property_scraper.spiders.otodom import (
     OtodomSpider,
     _STEALTH_SCRIPT,
@@ -17,7 +12,6 @@ from property_scraper.spiders.otodom import (
     _page_init,
     _page_init_investment,
     _pw_meta,
-    _pw_meta_investment,
 )
 
 
@@ -95,8 +89,8 @@ class TestPlaywrightMeta:
         assert method.args[0] == "networkidle"
 
     def test_pw_meta_investment_includes_evaluate(self):
-        """Test _pw_meta_investment includes evaluate method for unit fetching."""
-        meta = _pw_meta_investment()
+        """Test _pw_meta(investment=True) includes evaluate method for unit fetching."""
+        meta = _pw_meta(investment=True)
         assert "playwright_page_init_callback" in meta
         assert meta["playwright_page_init_callback"] == _page_init_investment
         
@@ -246,7 +240,7 @@ class TestIntegrationStealth:
         request = Request(
             url="https://www.otodom.pl/pl/inwestycja/test",
             callback=spider._on_investment_page,
-            meta={"ad_id": 123, "inv_slug": "test", "expected_units": 10, **_pw_meta_investment()}
+            meta={"ad_id": 123, "inv_slug": "test", "expected_units": 10, **_pw_meta(investment=True)}
         )
         
         # Verify investment-specific stealth

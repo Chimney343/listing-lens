@@ -28,3 +28,6 @@ pytest-mock = "^3.15.1"
 pytest-cov = "^7.0.0"
 freezegun = "^1.5.5"
 
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+pythonpath = [".", "scrapy_project"]

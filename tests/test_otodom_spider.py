@@ -1,7 +1,5 @@
 """Unit and integration tests for the OtodomSpider."""
 import json
-import sys
-from pathlib import Path
 from unittest.mock import Mock, patch, AsyncMock
 
 import pytest
@@ -9,11 +7,8 @@ import scrapy
 from scrapy.http import Response, Request, TextResponse
 from scrapy.utils.test import get_crawler
 
-# Add scrapy_project to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent / "scrapy_project"))
-
 from property_scraper.spiders.otodom import OtodomSpider
-from property_scraper.items import RawListingItem
+from property_scraper.items import RawListingItem, RawJsonItem
 
 
 # ─── Fixtures ──────────────────────────────────────────────────────────────
@@ -230,8 +225,7 @@ class TestAbsorbSearchItems:
         """Test absorbing regular listings."""
         spider._slugs = set()
         spider._investments = {}
-        spider._search_pages_received = 0  # Initialize missing attribute
-        spider._total_pages = 5  # Initialize missing attribute
+        spider._total_pages = 5
         search_data = {
             "items": [
                 {"slug": "listing-1", "estate": "REGULAR"},
@@ -243,13 +237,11 @@ class TestAbsorbSearchItems:
         assert "listing-1" in spider._slugs
         assert "listing-2" in spider._slugs
         assert len(spider._investments) == 0
-        assert spider._search_pages_received == 1
 
     def test_absorb_search_items_investment(self, spider):
         """Test absorbing investment listings."""
         spider._slugs = set()
         spider._investments = {}
-        spider._search_pages_received = 0
         spider._total_pages = 5
         search_data = {
             "items": [
@@ -266,13 +258,11 @@ class TestAbsorbSearchItems:
         assert len(spider._investments) == 1
         assert 999 in spider._investments
         assert spider._investments[999] == ("investment-1", 30)
-        assert spider._search_pages_received == 1
 
     def test_absorb_search_items_mixed(self, spider):
         """Test absorbing mixed regular and investment listings."""
         spider._slugs = set()
         spider._investments = {}
-        spider._search_pages_received = 0
         spider._total_pages = 5
         search_data = {
             "items": [
@@ -292,7 +282,6 @@ class TestAbsorbSearchItems:
         assert "regular-1" in spider._slugs
         assert "regular-2" in spider._slugs
         assert spider._investments[100] == ("investment-1", 20)
-        assert spider._search_pages_received == 1
 
 
 # ─── Integration Tests for Spider Flow ─────────────────────────────────────
@@ -470,9 +459,11 @@ class TestParseDetailMethod:
         )
         
         items = list(spider.parse_detail(response))
-        assert len(items) == 1
+        assert len(items) == 2
         item = items[0]
         assert isinstance(item, RawListingItem)
+        raw_item = items[1]
+        assert isinstance(raw_item, RawJsonItem)
         
         # Verify key fields
         assert item["source_portal"] == "otodom"
@@ -502,7 +493,9 @@ class TestParseDetailMethod:
         assert item["listing_type"] == "agency"
         assert len(item["photo_urls"]) == 2
         assert item["photo_count"] == 2
-        assert item["raw_json"] == sample_detail_json["props"]["pageProps"]["ad"]
+        assert raw_item["raw_json"] == sample_detail_json["props"]["pageProps"]["ad"]
+        assert raw_item["external_id"] == "12345"
+        assert raw_item["source_url"] == "https://www.otodom.pl/pl/oferta/test-slug"
 
     def test_parse_detail_no_script(self, spider):
         """Test detail parsing when __NEXT_DATA__ is missing."""
@@ -666,10 +659,9 @@ class TestEdgeCases:
         )
         
         items = list(spider.parse_detail(response))
-        assert len(items) == 1
+        assert len(items) == 2
         item = items[0]
-        
-        # Check that missing fields are handled gracefully
+        assert isinstance(item, RawListingItem)
         assert item["price_pln"] is None
         assert item["price_per_m2"] is None
         assert item["area_m2"] is None
