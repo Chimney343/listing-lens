@@ -2,6 +2,33 @@
 
 Automated system to scrape, deduplicate, store, score, and track property listings in Kraków, Poland.
 
+## Codebase Memory (codebase-memory-mcp)
+
+When this MCP server is available, prefer graph tools over grep/file search 
+for structural code questions. Graph queries return precise results in a single 
+tool call vs file-by-file exploration.
+
+### Indexing
+- Always use repo_path="/mnt/c/Users/mkkom/listing-lens"
+- The indexed project name is **mnt-c-Users-mkkom-listing-lens** — always use this as the `project` parameter in all graph tool calls
+- Never ask the user for the WSL repo path
+
+### When to use graph tools
+- "Who calls X?": `trace_call_path(function_name="X", direction="inbound")`
+- "What does X call?": `trace_call_path(function_name="X", direction="outbound")`
+- Find functions by pattern: `search_graph(label="Function", name_pattern=".*Pattern.*")`
+- Dead code: `search_graph(label="Function", relationship="CALLS", direction="inbound", max_degree=0, exclude_entry_points=true)`
+- Cross-service HTTP calls: `search_graph(relationship="HTTP_CALLS")`
+- REST routes: `search_graph(label="Route")`
+- Understand structure first: `get_graph_schema` before writing complex queries
+- Read source after finding a function: `get_code_snippet(qualified_name="...")`
+- Complex multi-hop patterns: `query_graph` with Cypher syntax
+
+### When NOT to use graph tools
+- Text search (string literals, error messages, config values) — use grep/Glob
+- Single file reads — use the Read tool directly
+- Syntax or formatting questions
+
 ## Architecture
 
 Scrapy spiders → Dedup (SHA-256 hash) → PostgreSQL + MinIO → LLM scoring → Feedback loop

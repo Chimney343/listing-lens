@@ -202,6 +202,29 @@ def build_morizon_url(area: SearchArea, page: int = 1) -> str:
 
 Otodom is a Next.js app. Listing data lives in `<script id="__NEXT_DATA__">` as JSON. Parse that, not HTML.
 
+### Investment Unit Expansion (Phase 1.5)
+
+When an investment is detected (search item with `estate: "INVESTMENT"`), the spider discovers the GraphQL persisted-query hash **per investment** entirely within the browser — no external HTTP clients.
+
+**How it works:**
+1. Spider yields a Playwright request to `https://www.otodom.pl/pl/inwestycja/{slug}`
+2. Before the page loads, `_page_init_investment()` injects `_CAPTURE_FETCH_SCRIPT` via `add_init_script`. This patches `window.fetch` to capture the first URL containing `PaginatedInvestmentUnits` into `window.__investmentApiUrl`.
+3. After `networkidle`, `_UNITS_FETCH_SCRIPT` is evaluated inside the page. It reads `window.__investmentApiUrl`, parses `sha256Hash` and `ad_id` from it, then issues paginated `fetch()` calls **from within the browser** (inheriting the page's cookies/session). Uses `pageSize=200` — tested to return all units in one shot.
+4. The evaluate result `{ sha256Hash, ad_id, items: [...] }` comes back to `_on_investment_page()` as `pm.result`.
+5. Unit slugs (from `items[].url`) are added to `self._slugs` for Phase 2.
+
+**Why browser-side fetch instead of httpx:**
+Direct httpx calls to `/api/query` return 403 because they lack the browser session cookies. Running the fetch inside the page's JS context uses the existing authenticated session with no extra cookie management.
+
+**Fallback:** If `window.__investmentApiUrl` was never set (hash not captured), `_extract_units_from_html()` scrapes `<a href="/pl/oferta/...">` tags on the rendered page — may be incomplete.
+
+**Key design decisions:**
+- No hardcoded hash — each investment page captures its own hash at scrape time via fetch interception
+- No httpx / no separate auth — all API calls run in the browser's own session
+- `_CAPTURE_FETCH_SCRIPT` must be an init script (injected before page JS runs), not injected after load
+- Use `new URL(relativeUrl, window.location.origin)` when constructing URLs to handle relative paths
+- The `persisted_hash` module is no longer used by the spider
+
 ```python
 # property_scraper/spiders/otodom.py
 
