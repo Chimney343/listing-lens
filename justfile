@@ -4,6 +4,9 @@
 
 set shell := ["powershell", "-Command"]
 
+# Make root-level modules (e.g. otodom_config) importable when scrapy runs from scrapy_project/
+export PYTHONPATH := justfile_directory()
+
 # Scrape first page of Otodom only (quick test / preview)
 scrape-otodom-1:
     cd scrapy_project; poetry run scrapy crawl otodom -a max_pages=1
