@@ -30,6 +30,14 @@ PLAYWRIGHT_LAUNCH_OPTIONS = {
     ],
 }
 PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT = 30_000
+
+# Block resource types that are irrelevant to scraping.
+# This eliminates ~35k sub-requests per full run, reduces memory pressure,
+# and prevents "Task was destroyed but it is pending!" from in-flight resources.
+# "fetch" and "document" must remain allowed — otodom uses fetch for API calls.
+PLAYWRIGHT_ABORT_REQUEST = lambda req: req.resource_type in {
+    "image", "media", "font", "ping", "websocket",
+}
 PLAYWRIGHT_CONTEXTS = {
     "default": {
         "user_agent": (
@@ -66,7 +74,7 @@ AUTOTHROTTLE_TARGET_CONCURRENCY = 1.0
 AUTOTHROTTLE_DEBUG = False
 
 # ─── DOWNLOAD DELAY (randomized) ────────────────────────────
-DOWNLOAD_DELAY = 3
+DOWNLOAD_DELAY = 12
 RANDOMIZE_DOWNLOAD_DELAY = True  # [0.5*delay, 1.5*delay]
 
 # ─── CONCURRENCY ────────────────────────────────────────────
