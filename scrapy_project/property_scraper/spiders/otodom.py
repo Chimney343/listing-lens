@@ -1,13 +1,24 @@
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlencode
+from typing import Optional
 
 import scrapy
 from scrapy_playwright.page import PageMethod
 
 from property_scraper.area_config import SearchArea, build_otodom_url
 from property_scraper.items import RawListingItem
+
+
+# Import config from root directory
+try:
+    from otodom_config import OtodomSpiderConfig
+except ImportError:
+    # Fallback for development
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+    from otodom_config import OtodomSpiderConfig
+
 
 _STEALTH_SCRIPT = """
     Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
@@ -16,9 +27,73 @@ _STEALTH_SCRIPT = """
     Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
 """
 
+# Intercepts window.fetch on investment pages to capture the
+# PaginatedInvestmentUnits API URL (which contains the sha256Hash).
+_CAPTURE_FETCH_SCRIPT = """
+    const _origFetch = window.fetch;
+    window.__investmentApiUrl = null;
+    window.fetch = function(...args) {
+        const url = typeof args[0] === 'string' ? args[0]
+                  : (args[0] && args[0].url ? args[0].url : '');
+        if (url.includes('PaginatedInvestmentUnits')) {
+            window.__investmentApiUrl = url;
+        }
+        return _origFetch.apply(this, args);
+    };
+"""
+
+# Runs after networkidle: reads the intercepted URL, extracts the hash and ad_id,
+# then issues paginated fetch calls (using the page's own session/cookies) with
+# pageSize=200 so all units come back without separate httpx calls.
+_UNITS_FETCH_SCRIPT = """
+async () => {
+    if (!window.__investmentApiUrl) return null;
+    let ad_id, sha256Hash;
+    try {
+        const u = new URL(window.__investmentApiUrl, window.location.origin);
+        const vars = JSON.parse(u.searchParams.get('variables') || '{}');
+        const exts = JSON.parse(u.searchParams.get('extensions') || '{}');
+        ad_id = vars.id;
+        sha256Hash = exts && exts.persistedQuery && exts.persistedQuery.sha256Hash;
+    } catch (e) {
+        return { error: 'parse_failed', message: String(e) };
+    }
+    if (!ad_id || !sha256Hash) return { error: 'missing_params' };
+
+    const allItems = [];
+    let page = 1, totalPages = 1;
+    do {
+        const vars = JSON.stringify({
+            id: ad_id,
+            lookup: { filters: { numberOfRooms: [] }, page, pageSize: 200,
+                      sort: { by: 'Price', direction: 'asc' }, withFacets: true }
+        });
+        const exts = JSON.stringify({ persistedQuery: { sha256Hash, version: 1 } });
+        const params = new URLSearchParams({
+            operationName: 'PaginatedInvestmentUnits',
+            variables: vars, extensions: exts
+        });
+        const resp = await fetch('/api/query?' + params.toString());
+        if (!resp.ok) return { error: resp.status, sha256Hash };
+        const data = await resp.json();
+        const paginated = data && data.data && data.data.paginatedUnits;
+        if (!paginated) return { error: 'no_data', sha256Hash };
+        allItems.push.apply(allItems, paginated.items || []);
+        totalPages = (paginated.pagination && paginated.pagination.totalPages) || 1;
+        page++;
+    } while (page <= totalPages);
+    return { sha256Hash, ad_id, items: allItems };
+}
+"""
+
 
 async def _page_init(page, request):
     await page.add_init_script(_STEALTH_SCRIPT)
+
+
+async def _page_init_investment(page, request):
+    """Init script for investment pages: stealth + fetch interceptor."""
+    await page.add_init_script(_STEALTH_SCRIPT + _CAPTURE_FETCH_SCRIPT)
 
 
 def _pw_meta(wait_networkidle: bool = True) -> dict:
@@ -31,44 +106,39 @@ def _pw_meta(wait_networkidle: bool = True) -> dict:
     }
 
 
+def _pw_meta_investment() -> dict:
+    """Playwright meta for investment pages: captures API URL via fetch interception."""
+    return {
+        "playwright": True,
+        "playwright_context": "default",
+        "playwright_page_init_callback": _page_init_investment,
+        "playwright_page_methods": [
+            PageMethod("wait_for_load_state", "networkidle", timeout=30_000),
+            PageMethod("evaluate", _UNITS_FETCH_SCRIPT),
+        ],
+    }
+
+
 _PROPERTY_TYPE_MAP = {"mieszkanie": "apartment", "dom": "house"}
-
-# GraphQL persisted-query hash for fetching investment unit listings.
-_PAGINATED_UNITS_HASH = "ddc9f328a32057395caf18ef667d3ee4242ea57e73481cc8a56ee9618d0c2b31"
-_UNITS_API_PAGE_SIZE = 200  # API accepts at least 200
-
-
-def _build_units_api_url(ad_id: int, page: int = 1) -> str:
-    """Build the /api/query URL for PaginatedInvestmentUnits."""
-    variables = json.dumps({
-        "id": ad_id,
-        "lookup": {
-            "filters": {"numberOfRooms": []},
-            "page": page,
-            "pageSize": _UNITS_API_PAGE_SIZE,
-            "sort": {"by": "Price", "direction": "asc"},
-            "withFacets": True,
-        },
-    }, separators=(",", ":"))
-    extensions = json.dumps({
-        "persistedQuery": {
-            "sha256Hash": _PAGINATED_UNITS_HASH,
-            "version": 1,
-        },
-    }, separators=(",", ":"))
-    return (
-        "https://www.otodom.pl/api/query?"
-        + urlencode({
-            "operationName": "PaginatedInvestmentUnits",
-            "variables": variables,
-            "extensions": extensions,
-        })
-    )
 
 
 class OtodomSpider(scrapy.Spider):
     name = "otodom"
     allowed_domains = ["otodom.pl"]
+
+    @classmethod
+    def from_crawler(cls, crawler, *args, **kwargs):
+        spider = super().from_crawler(crawler, *args, **kwargs)
+        # Spider owns the run directory — create it now so all pipelines use the
+        # same path, and configure FEEDS so output.jsonl lands there too.
+        spider.run_dir.mkdir(parents=True, exist_ok=True)
+        feed_path = str(spider.run_dir / "output.jsonl")
+        crawler.settings.set(
+            "FEEDS",
+            {feed_path: {"format": "jsonlines", "encoding": "utf-8", "overwrite": True}},
+            priority="spider",
+        )
+        return spider
 
     def __init__(
         self,
@@ -80,30 +150,103 @@ class OtodomSpider(scrapy.Spider):
         districts: str = "",
         price_min: str | None = None,
         price_max: str | None = None,
-        max_pages: str = "20",
+        max_pages: str | None = None,
         phase1_only: str = "0",
         slug: str | None = None,
+        config: Optional[OtodomSpiderConfig] = None,
+        config_file: Optional[str] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
-        self.phase1_only = phase1_only.strip() not in ("0", "false", "")
+        
+        # Load config from file if specified
+        if config_file is not None:
+            try:
+                from otodom_config import load_config_from_file
+                config = load_config_from_file(config_file)
+                self.logger.info(f"Loaded config from file: {config_file}")
+            except Exception as e:
+                self.logger.error(f"Failed to load config from {config_file}: {e}")
+                raise
+        
+        # Use config if provided, otherwise use individual parameters
+        if config is not None:
+            # Override all parameters from config
+            city = config.city
+            voivodeship = config.voivodeship
+            powiat = config.powiat
+            gmina = config.gmina
+            property_type = config.property_type
+            districts = config.districts
+            price_min = config.price_min
+            price_max = config.price_max
+            max_pages = config.max_pages
+            phase1_only = config.phase1_only
+            slug = config.slug
+            self.phase1_only = config.phase1_only_bool
+        else:
+            self.phase1_only = phase1_only.strip() not in ("0", "false", "")
+        
         self.single_slug = slug
-        self.area = SearchArea(
-            city=city,
-            voivodeship=voivodeship,
-            powiat=powiat,
-            gmina=gmina,
-            property_type=property_type,
-            districts=[d.strip() for d in districts.split(",") if d.strip()],
-            price_min=int(price_min) if price_min else None,
-            price_max=int(price_max) if price_max else None,
-            max_pages=int(max_pages),
-        )
+        
+        # Store all parameters for logging
+        self._parameters = {
+            "city": city,
+            "voivodeship": voivodeship,
+            "powiat": powiat,
+            "gmina": gmina,
+            "property_type": property_type,
+            "districts": districts,
+            "price_min": price_min,
+            "price_max": price_max,
+            "max_pages": max_pages,
+            "phase1_only": phase1_only,
+            "slug": slug,
+        }
+        
+        # Timestamp is fixed at construction so run_dir is stable before start().
+        self.run_timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        self._start_time = None
+        self._end_time = None
+        
+        # run_dir will be computed lazily when self.settings is available
+        self._run_dir = None
+        
+        # Use config's to_search_area() if available, otherwise construct SearchArea manually
+        if config is not None:
+            self.area = config.to_search_area()
+        else:
+            self.area = SearchArea(
+                city=city,
+                voivodeship=voivodeship,
+                powiat=powiat,
+                gmina=gmina,
+                property_type=property_type,
+                districts=[d.strip() for d in districts.split(",") if d.strip()],
+                price_min=int(price_min) if price_min else None,
+                price_max=int(price_max) if price_max else None,
+                max_pages=int(max_pages) if max_pages else None,
+            )
+        self._detail_scraped: int = 0
+        self._detail_total: int = 0
+
+    @property
+    def run_dir(self) -> Path:
+        """Lazy compute run directory using settings."""
+        if self._run_dir is None:
+            data_dir = Path(self.settings.get("DATA_DIR"))
+            # Use placeholder if run_timestamp not yet set (e.g., during spider opening)
+            timestamp = self.run_timestamp or "pending"
+            self._run_dir = data_dir / "otodom" / timestamp
+        return self._run_dir
 
     # ─── Phase 1: collect slugs from all search pages ────────────
 
     async def start(self):
+        self._start_time = datetime.now(timezone.utc)
+        
         if self.single_slug:
+            self.logger.info("Single-slug mode: scraping %s", self.single_slug)
             yield scrapy.Request(
                 f"https://www.otodom.pl/pl/oferta/{self.single_slug}",
                 callback=self.parse_detail,
@@ -111,6 +254,14 @@ class OtodomSpider(scrapy.Spider):
                 meta=_pw_meta(),
             )
             return
+        price_range = (
+            f"{self.area.price_min or '?'}–{self.area.price_max or '?'} PLN"
+        )
+        self.logger.info(
+            "Starting search: city=%s, type=%s, price=%s, max_pages=%s",
+            self.area.city, self.area.property_type, price_range,
+            "all" if self.area.max_pages is None else str(self.area.max_pages),
+        )
         url = build_otodom_url(self.area, page=1)
         yield scrapy.Request(url, callback=self._bootstrap, meta={"page": 1, **_pw_meta()})
 
@@ -123,14 +274,15 @@ class OtodomSpider(scrapy.Spider):
         pagination = search_data.get("pagination", {})
         self._total_items: int = pagination.get("totalItems", 0)
         total_pages: int = pagination.get("totalPages", 1)
-        self._total_pages: int = min(total_pages, self.area.max_pages)
+        self._total_pages: int = total_pages if self.area.max_pages is None else min(total_pages, self.area.max_pages)
         self._slugs: set[str] = set()
         self._investments: dict[int, tuple[str, int]] = {}  # ad_id → (slug, expected_units)
         self._search_pages_received: int = 0
 
         self.logger.info(
-            "Bootstrap: API reports %d items across %d pages (capped at %d)",
-            self._total_items, total_pages, self._total_pages,
+            "Bootstrap: API reports %d items across %d pages%s",
+            self._total_items, total_pages,
+            f" (capped at {self._total_pages})" if self.area.max_pages is not None else "",
         )
 
         self._absorb_search_items(search_data, page=1)
@@ -167,19 +319,26 @@ class OtodomSpider(scrapy.Spider):
             if item.get("estate") == "INVESTMENT":
                 ad_id = item.get("id")
                 if ad_id:
+                    is_new = ad_id not in self._investments
                     expected = item.get("investmentUnitsNumber", 0)
                     self._investments[ad_id] = (slug, expected)
-                    self.logger.info(
-                        "  Investment detected: %s (id=%s, %d units)",
-                        slug, ad_id, expected,
-                    )
+                    if is_new:
+                        self.logger.info(
+                            "  Investment detected: %s (id=%s, %d units)",
+                            slug, ad_id, expected,
+                        )
+                    else:
+                        self.logger.debug(
+                            "  Investment re-seen on page %d: %s", page, slug
+                        )
             else:
                 self._slugs.add(slug)
         added = len(self._slugs) - before
         self._search_pages_received += 1
+        inv_part = f", {len(self._investments)} investment(s)" if self._investments else ""
         self.logger.info(
-            "Search page %d/%d — %d new listing slugs (running total: %d listings, %d investments)",
-            page, self._total_pages, added, len(self._slugs), len(self._investments),
+            "Search page %d/%d: +%d slugs (total: %d%s)",
+            page, self._total_pages, added, len(self._slugs), inv_part,
         )
 
     # ─── Phase 1.5: expand investments into unit slugs ───────────
@@ -194,105 +353,94 @@ class OtodomSpider(scrapy.Spider):
         )
 
         if investment_count > 0:
-            # Track how many investment API responses we're waiting for
+            total_expected_units = sum(u for _, u in self._investments.values())
+            self.logger.info(
+                "Phase 1.5: expanding %d investment(s) — %d units expected",
+                investment_count, total_expected_units,
+            )
+            # Load each investment page with Playwright to discover its hash
+            # and intercept the PaginatedInvestmentUnits API response.
             self._investment_responses_pending = investment_count
             for ad_id, (inv_slug, expected_units) in self._investments.items():
-                self.logger.info(
-                    "Phase 1.5: fetching unit slugs for investment %s (id=%d, %d expected)",
-                    inv_slug, ad_id, expected_units,
-                )
                 yield scrapy.Request(
-                    _build_units_api_url(ad_id),
-                    callback=self._parse_investment_units,
+                    f"https://www.otodom.pl/pl/inwestycja/{inv_slug}",
+                    callback=self._on_investment_page,
                     errback=self._on_investment_error,
                     meta={
                         "ad_id": ad_id, "inv_slug": inv_slug,
-                        "expected_units": expected_units, **_pw_meta(),
+                        "expected_units": expected_units, **_pw_meta_investment(),
                     },
                 )
         else:
             yield from self._finish_all_collection()
 
-    def _parse_investment_units(self, response):
-        """Parse GraphQL PaginatedInvestmentUnits response and collect unit slugs."""
+    def _on_investment_page(self, response):
+        """Extract hash from investment page and fetch all units via direct API call."""
         ad_id = response.meta["ad_id"]
         inv_slug = response.meta["inv_slug"]
         expected_units = response.meta["expected_units"]
 
-        try:
-            raw = response.css("pre::text").get() or response.text
-            jdata = json.loads(raw)
-        except (json.JSONDecodeError, Exception) as e:
+        # Always add the parent investment slug
+        self._slugs.add(inv_slug)
+
+        # Read the evaluate result: the JS fetched all units using the page's session
+        result = None
+        for pm in response.meta.get("playwright_page_methods", []):
+            if pm.method == "evaluate" and isinstance(pm.result, dict):
+                result = pm.result
+                break
+
+        if not result or result.get("error"):
             self.logger.error(
-                "Failed to parse investment units API for %s (id=%d): %s",
-                inv_slug, ad_id, e,
+                "Investment %s (id=%d): could not fetch units via API (%s) "
+                "\u2014 falling back to HTML link extraction",
+                inv_slug, ad_id, result,
             )
+            self._extract_units_from_html(response, inv_slug)
             self._investment_responses_pending -= 1
             if self._investment_responses_pending == 0:
                 yield from self._finish_all_collection()
             return
 
-        paginated = jdata.get("data", {}).get("paginatedUnits", {})
-        items = paginated.get("items", [])
-        pagination = paginated.get("pagination", {})
-        total_results = pagination.get("totalResults", 0)
-        total_pages = pagination.get("totalPages", 1)
+        sha256_hash = result["sha256Hash"]
+        items = result.get("items", [])
+        total = len(items)
 
-        if expected_units and total_results != expected_units:
+        if expected_units and total != expected_units:
             self.logger.warning(
-                "Investment %s: search advertised %d units but API reports %d",
-                inv_slug, expected_units, total_results,
+                "Investment %s: expected %d units but API returned %d",
+                inv_slug, expected_units, total,
             )
 
-        unit_slugs = set()
         for unit in items:
-            url = unit.get("url", "")
-            if url:
-                unit_slugs.add(url.rstrip("/").split("/")[-1])
+            unit_url = unit.get("url", "")
+            if unit_url:
+                self._slugs.add(unit_url.rstrip("/").split("/")[-1])
 
-        # Store parent slug too — validation pipeline decides what to do with it
-        self._slugs.add(inv_slug)
-        self._slugs.update(unit_slugs)
         self.logger.info(
-            "Investment %s: collected %d/%d unit slugs (total slugs now: %d)",
-            inv_slug, len(unit_slugs), total_results, len(self._slugs),
+            "Investment %s: %d/%d units collected (hash %.8s\u2026)",
+            inv_slug, total, expected_units or total, sha256_hash,
         )
 
-        # If >200 units exist, schedule extra pages and track them in pending counter
-        extra_pages = total_pages - 1 if len(items) < total_results and total_pages > 1 else 0
-        self._investment_responses_pending += extra_pages
-        for pg in range(2, total_pages + 1):
-            yield scrapy.Request(
-                _build_units_api_url(ad_id, page=pg),
-                callback=self._parse_investment_units_extra,
-                errback=self._on_investment_error,
-                meta={"ad_id": ad_id, "inv_slug": inv_slug, **_pw_meta()},
-            )
-
         self._investment_responses_pending -= 1
         if self._investment_responses_pending == 0:
             yield from self._finish_all_collection()
 
-    def _parse_investment_units_extra(self, response):
-        """Handle additional pages of investment units (for >200 unit investments)."""
-        try:
-            raw = response.css("pre::text").get() or response.text
-            jdata = json.loads(raw)
-        except Exception:
-            self._investment_responses_pending -= 1
-            if self._investment_responses_pending == 0:
-                yield from self._finish_all_collection()
-            return
-
-        items = jdata.get("data", {}).get("paginatedUnits", {}).get("items", [])
-        for unit in items:
-            url = unit.get("url", "")
-            if url:
-                self._slugs.add(url.rstrip("/").split("/")[-1])
-
-        self._investment_responses_pending -= 1
-        if self._investment_responses_pending == 0:
-            yield from self._finish_all_collection()
+    def _extract_units_from_html(self, response, inv_slug: str) -> None:
+        """Fallback: scrape unit slugs from <a> tags on the investment page."""
+        import re
+        links = response.css('a[href*="/pl/oferta/"]::attr(href)').getall()
+        unit_slugs = set()
+        for href in links:
+            m = re.search(r"/pl/oferta/([a-zA-Z0-9-]+)", href)
+            if m:
+                unit_slugs.add(m.group(1))
+        unit_slugs.discard(inv_slug)
+        self._slugs.update(unit_slugs)
+        self.logger.warning(
+            "Investment %s: HTML fallback collected %d unit slugs (may be incomplete)",
+            inv_slug, len(unit_slugs),
+        )
 
     # ─── Error handlers ──────────────────────────────────────────
 
@@ -304,8 +452,8 @@ class OtodomSpider(scrapy.Spider):
             yield from self._finish_search_collection()
 
     def _on_investment_error(self, failure):
-        """Handle failed investment API request."""
-        self.logger.error("Investment API request failed: %s", failure.value)
+        """Handle failed investment page load."""
+        self.logger.error("Investment page request failed: %s", failure.value)
         self._investment_responses_pending -= 1
         if self._investment_responses_pending == 0:
             yield from self._finish_all_collection()
@@ -320,15 +468,22 @@ class OtodomSpider(scrapy.Spider):
     # ─── Phase 2: scrape detail pages ────────────────────────────
 
     def _persist_slug_run(self) -> None:
-        """Write slug run record to data/slug_runs.jsonl."""
-        data_dir = Path(self.settings.get("DATA_DIR"))
-        data_dir.mkdir(parents=True, exist_ok=True)
-        slug_runs_file = data_dir / "slug_runs.jsonl"
+        """Write slug run record to run_dir/slug_runs.jsonl."""
+        # Ensure run directory exists
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        slug_runs_file = self.run_dir / "slug_runs.jsonl"
 
         collected = len(self._slugs)
         investment_count = len(self._investments)
+        total_investment_slugs = sum(
+            u for _, u in self._investments.values()
+        ) + investment_count  # units + 1 parent slug each
+        regular_count = collected - total_investment_slugs
         record = {
+            "run_id": self.run_timestamp,
             "run_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "record_type": "slug_collection",
+            "parameters": self._parameters,
             "city": self.area.city,
             "total_advertised": self._total_items,
             "investments_found": investment_count,
@@ -342,10 +497,12 @@ class OtodomSpider(scrapy.Spider):
         with open(slug_runs_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
 
+        inv_detail = ""
+        if investment_count:
+            inv_detail = f" + {total_investment_slugs} from {investment_count} investment(s)"
         self.logger.info(
-            "Final slug set: %d total (%d from search + expanded from %d investments). "
-            "Saved to %s",
-            collected, collected - investment_count, investment_count, slug_runs_file,
+            "Slug collection complete: %d total (%d regular%s). Saved to %s",
+            collected, regular_count, inv_detail, slug_runs_file,
         )
 
     def _finish_all_collection(self):
@@ -357,7 +514,9 @@ class OtodomSpider(scrapy.Spider):
             return
 
         collected = len(self._slugs)
-        self.logger.info("Phase 2: fetching %d detail pages", collected)
+        self._detail_scraped = 0
+        self._detail_total = collected
+        self.logger.info("Phase 2: scraping %d detail pages", collected)
         for slug in self._slugs:
             yield scrapy.Request(
                 f"https://www.otodom.pl/pl/oferta/{slug}",
@@ -461,6 +620,14 @@ class OtodomSpider(scrapy.Spider):
             for u in photo_urls
         )
         item["raw_json"] = ad
+
+        self._detail_scraped += 1
+        done, total = self._detail_scraped, self._detail_total
+        # Log every 10%, but at least every 25 pages
+        step = max(25, total // 10)
+        if done % step == 0 or done == total:
+            self.logger.info("Phase 2: %d/%d detail pages scraped", done, total)
+
         yield item
 
     # ─── Static helpers ──────────────────────────────────────────
@@ -495,3 +662,34 @@ class OtodomSpider(scrapy.Spider):
             return int(floor_str)
         except (ValueError, TypeError):
             return None
+    
+    def closed(self, reason):
+        """Called when spider closes. Set end time and write completion record."""
+        self._end_time = datetime.now(timezone.utc)
+        
+        # Write completion record with runtime if run_dir exists
+        if hasattr(self, 'run_dir') and self.run_dir and self._start_time:
+            try:
+                slug_runs_file = self.run_dir / "slug_runs.jsonl"
+                runtime_seconds = (self._end_time - self._start_time).total_seconds()
+                
+                completion_record = {
+                    "run_id": self.run_timestamp,
+                    "start_time": self._start_time.isoformat(timespec="seconds"),
+                    "end_time": self._end_time.isoformat(timespec="seconds"),
+                    "runtime_seconds": runtime_seconds,
+                    "runtime_human": f"{runtime_seconds:.1f}s",
+                    "parameters": self._parameters,
+                    "completion_reason": reason,
+                    "record_type": "completion"
+                }
+                
+                with open(slug_runs_file, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(completion_record) + "\n")
+                
+                self.logger.info(
+                    "Spider completed in %.1f seconds. Reason: %s",
+                    runtime_seconds, reason
+                )
+            except Exception as e:
+                self.logger.error("Failed to write completion record: %s", e)

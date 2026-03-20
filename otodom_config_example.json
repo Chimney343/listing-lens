@@ -1,0 +1,13 @@
+{
+  "city": "krakow",
+  "voivodeship": "malopolskie",
+  "powiat": "krakowski",
+  "gmina": "gmina-miejska--krakow",
+  "property_type": "mieszkanie",
+  "districts": "kazimierz,stare-miasto,podgorze",
+  "price_min": "300000",
+  "price_max": "700000",
+  "max_pages": "10",
+  "phase1_only": "0",
+  "slug": null
+}

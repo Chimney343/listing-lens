@@ -15,7 +15,7 @@ class SearchArea:
     area_max: float | None = None
     rooms_min: int | None = None
     rooms_max: int | None = None
-    max_pages: int = 20
+    max_pages: int | None = None  # None means no limit, scrape all pages
 
 
 OTODOM_DISTRICT_SLUGS = {
