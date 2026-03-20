@@ -3,6 +3,8 @@ import logging
 
 import scrapy
 
+from property_scraper.items import RawListingItem
+
 logger = logging.getLogger(__name__)
 
 
@@ -21,6 +23,8 @@ class ValidationPipeline:
         self._reject_file.close()
 
     def process_item(self, item, spider=None):
+        if not isinstance(item, RawListingItem):
+            return item
         reason = None
         if not item.get("source_url"):
             reason = "missing_source_url"
@@ -42,6 +46,8 @@ class PhotoDownloadPipeline:
     """Stub — full implementation in Stage 3 (Storage / MinIO)."""
 
     def process_item(self, item, spider=None):
+        if not isinstance(item, RawListingItem):
+            return item
         item["photo_paths"] = []
         return item
 
@@ -50,5 +56,7 @@ class DatabasePipeline:
     """Stub — full implementation in Stage 3 (Storage / PostgreSQL)."""
 
     def process_item(self, item, spider=None):
+        if not isinstance(item, RawListingItem):
+            return item
         logger.debug("DatabasePipeline stub: %s", item.get("source_url"))
         return item

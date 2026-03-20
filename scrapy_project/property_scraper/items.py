@@ -1,5 +1,19 @@
 import scrapy
 from scrapy import Field
+from itemloaders.processors import Identity
+
+
+class RawJsonItem(scrapy.Item):
+    """Holds the full raw API dict for a listing.  Written to raw_output.jsonl.
+
+    To graduate a field to RawListingItem:
+      1. Add the field to RawListingItem below.
+      2. Extract the value here and add a loader.add_value() call in parse_detail.
+      3. Remove it from the raw_json dict if desired (or leave it — duplication is fine).
+    """
+    external_id = Field()   # links back to RawListingItem
+    source_url  = Field()
+    raw_json    = Field()   # the full ad dict straight from __NEXT_DATA__
 
 
 class RawListingItem(scrapy.Item):
@@ -49,9 +63,9 @@ class RawListingItem(scrapy.Item):
     date_scraped = Field()
 
     # ─── Photos ──────────────────────────────────────────────────
-    photo_urls = Field()          # list[str] — remote URLs
+    photo_urls = Field(output_processor=Identity())  # list[str] — remote URLs
     photo_count = Field()
     photo_paths = Field()         # list[str] — MinIO object keys (set by pipeline)
 
     # ─── Raw data ────────────────────────────────────────────────
-    raw_json = Field()            # Full source dict for debugging / re-parsing
+    # raw_json lives in RawJsonItem (written to raw_output.jsonl) — not here.

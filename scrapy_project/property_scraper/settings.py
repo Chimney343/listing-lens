@@ -62,6 +62,7 @@ USER_AGENT = (
 )
 
 DOWNLOADER_MIDDLEWARES = {
+    "scrapy_impersonate.RandomBrowserMiddleware": 500,
     "scrapy.downloadermiddlewares.useragent.UserAgentMiddleware": None,
     "scrapy.downloadermiddlewares.retry.RetryMiddleware": None,
 }
@@ -70,7 +71,7 @@ DOWNLOADER_MIDDLEWARES = {
 AUTOTHROTTLE_ENABLED = True
 AUTOTHROTTLE_START_DELAY = 3.0
 AUTOTHROTTLE_MAX_DELAY = 15.0
-AUTOTHROTTLE_TARGET_CONCURRENCY = 1.0
+AUTOTHROTTLE_TARGET_CONCURRENCY = 2.0
 AUTOTHROTTLE_DEBUG = False
 
 # ─── DOWNLOAD DELAY (randomized) ────────────────────────────
@@ -78,7 +79,7 @@ DOWNLOAD_DELAY = 12
 RANDOMIZE_DOWNLOAD_DELAY = True  # [0.5*delay, 1.5*delay]
 
 # ─── CONCURRENCY ────────────────────────────────────────────
-CONCURRENT_REQUESTS = 4
+CONCURRENT_REQUESTS = 8
 CONCURRENT_REQUESTS_PER_DOMAIN = 1
 CONCURRENT_ITEMS = 50
 

@@ -1,23 +1,17 @@
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 import scrapy
+from itemloaders.processors import TakeFirst
+from scrapy.loader import ItemLoader
 from scrapy_playwright.page import PageMethod
 
+from otodom_config import OtodomSpiderConfig
 from property_scraper.area_config import SearchArea, build_otodom_url
-from property_scraper.items import RawListingItem
-
-
-# Import config from root directory
-try:
-    from otodom_config import OtodomSpiderConfig
-except ImportError:
-    # Fallback for development
-    import sys
-    sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
-    from otodom_config import OtodomSpiderConfig
+from property_scraper.items import RawListingItem, RawJsonItem
 
 
 _STEALTH_SCRIPT = """
@@ -96,26 +90,17 @@ async def _page_init_investment(page, request):
     await page.add_init_script(_STEALTH_SCRIPT + _CAPTURE_FETCH_SCRIPT)
 
 
-def _pw_meta(wait_networkidle: bool = True) -> dict:
-    methods = [PageMethod("wait_for_load_state", "networkidle", timeout=30_000)] if wait_networkidle else []
+def _pw_meta(investment: bool = False) -> dict:
+    """Return Playwright request meta.  Pass investment=True for investment pages."""
+    init_cb = _page_init_investment if investment else _page_init
+    methods: list = [PageMethod("wait_for_load_state", "networkidle", timeout=30_000)]
+    if investment:
+        methods.append(PageMethod("evaluate", _UNITS_FETCH_SCRIPT))
     return {
         "playwright": True,
         "playwright_context": "default",
-        "playwright_page_init_callback": _page_init,
+        "playwright_page_init_callback": init_cb,
         "playwright_page_methods": methods,
-    }
-
-
-def _pw_meta_investment() -> dict:
-    """Playwright meta for investment pages: captures API URL via fetch interception."""
-    return {
-        "playwright": True,
-        "playwright_context": "default",
-        "playwright_page_init_callback": _page_init_investment,
-        "playwright_page_methods": [
-            PageMethod("wait_for_load_state", "networkidle", timeout=30_000),
-            PageMethod("evaluate", _UNITS_FETCH_SCRIPT),
-        ],
     }
 
 
@@ -132,10 +117,24 @@ class OtodomSpider(scrapy.Spider):
         # Spider owns the run directory — create it now so all pipelines use the
         # same path, and configure FEEDS so output.jsonl lands there too.
         spider.run_dir.mkdir(parents=True, exist_ok=True)
-        feed_path = str(spider.run_dir / "output.jsonl")
+        parsed_path = str(spider.run_dir / "output.jsonl")
+        raw_path = str(spider.run_dir / "raw_output.jsonl")
         crawler.settings.set(
             "FEEDS",
-            {feed_path: {"format": "jsonlines", "encoding": "utf-8", "overwrite": True}},
+            {
+                parsed_path: {
+                    "format": "jsonlines",
+                    "encoding": "utf-8",
+                    "overwrite": True,
+                    "item_classes": [RawListingItem],
+                },
+                raw_path: {
+                    "format": "jsonlines",
+                    "encoding": "utf-8",
+                    "overwrite": True,
+                    "item_classes": [RawJsonItem],
+                },
+            },
             priority="spider",
         )
         return spider
@@ -286,6 +285,7 @@ class OtodomSpider(scrapy.Spider):
         )
 
         self._absorb_search_items(search_data, page=1)
+        self._search_pages_received += 1
 
         for page in range(2, self._total_pages + 1):
             yield scrapy.Request(
@@ -295,22 +295,24 @@ class OtodomSpider(scrapy.Spider):
                 meta={"page": page, **_pw_meta()},
             )
 
-        if self._total_pages == 1:
+        if self._search_pages_received == self._total_pages:
             yield from self._finish_search_collection()
 
     def _collect_slugs(self, response):
         """Collect slugs from a follow-up search page; trigger next phase when done."""
         search_data = self._parse_search_data(response)
-        if search_data is None:
-            self._search_pages_received += 1
-        else:
+        if search_data is not None:
             self._absorb_search_items(search_data, page=response.meta["page"])
+        self._search_pages_received += 1
 
         if self._search_pages_received == self._total_pages:
             yield from self._finish_search_collection()
 
     def _absorb_search_items(self, search_data: dict, page: int) -> None:
-        """Extract slugs from a search page, separating investments from regular listings."""
+        """Extract slugs from a search page, separating investments from regular listings.
+
+        Does NOT touch _search_pages_received — callers are responsible for that.
+        """
         before = len(self._slugs)
         for item in search_data.get("items", []):
             slug = item.get("slug", "")
@@ -334,7 +336,6 @@ class OtodomSpider(scrapy.Spider):
             else:
                 self._slugs.add(slug)
         added = len(self._slugs) - before
-        self._search_pages_received += 1
         inv_part = f", {len(self._investments)} investment(s)" if self._investments else ""
         self.logger.info(
             "Search page %d/%d: +%d slugs (total: %d%s)",
@@ -368,7 +369,7 @@ class OtodomSpider(scrapy.Spider):
                     errback=self._on_investment_error,
                     meta={
                         "ad_id": ad_id, "inv_slug": inv_slug,
-                        "expected_units": expected_units, **_pw_meta_investment(),
+                        "expected_units": expected_units, **_pw_meta(investment=True),
                     },
                 )
         else:
@@ -428,7 +429,6 @@ class OtodomSpider(scrapy.Spider):
 
     def _extract_units_from_html(self, response, inv_slug: str) -> None:
         """Fallback: scrape unit slugs from <a> tags on the investment page."""
-        import re
         links = response.css('a[href*="/pl/oferta/"]::attr(href)').getall()
         unit_slugs = set()
         for href in links:
@@ -451,6 +451,7 @@ class OtodomSpider(scrapy.Spider):
         if self._search_pages_received == self._total_pages:
             yield from self._finish_search_collection()
 
+
     def _on_investment_error(self, failure):
         """Handle failed investment page load."""
         self.logger.error("Investment page request failed: %s", failure.value)
@@ -467,19 +468,10 @@ class OtodomSpider(scrapy.Spider):
 
     # ─── Phase 2: scrape detail pages ────────────────────────────
 
-    def _persist_slug_run(self) -> None:
-        """Write slug run record to run_dir/slug_runs.jsonl."""
-        # Ensure run directory exists
-        self.run_dir.mkdir(parents=True, exist_ok=True)
-        slug_runs_file = self.run_dir / "slug_runs.jsonl"
-
-        collected = len(self._slugs)
+    def _build_slug_run_record(self) -> dict:
+        """Build the slug collection record dict (pure — no I/O)."""
         investment_count = len(self._investments)
-        total_investment_slugs = sum(
-            u for _, u in self._investments.values()
-        ) + investment_count  # units + 1 parent slug each
-        regular_count = collected - total_investment_slugs
-        record = {
+        return {
             "run_id": self.run_timestamp,
             "run_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "record_type": "slug_collection",
@@ -491,18 +483,25 @@ class OtodomSpider(scrapy.Spider):
                 str(k): {"slug": slug, "expected_units": units}
                 for k, (slug, units) in self._investments.items()
             },
-            "slug_count": collected,
+            "slug_count": len(self._slugs),
             "slugs": sorted(self._slugs),
         }
+
+    def _persist_slug_run(self) -> None:
+        """Write slug run record to run_dir/slug_runs.jsonl."""
+        record = self._build_slug_run_record()
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        slug_runs_file = self.run_dir / "slug_runs.jsonl"
         with open(slug_runs_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
 
-        inv_detail = ""
-        if investment_count:
-            inv_detail = f" + {total_investment_slugs} from {investment_count} investment(s)"
+        investment_count = len(self._investments)
+        total_investment_slugs = sum(u for _, u in self._investments.values()) + investment_count
+        regular_count = len(self._slugs) - total_investment_slugs
+        inv_detail = f" + {total_investment_slugs} from {investment_count} investment(s)" if investment_count else ""
         self.logger.info(
             "Slug collection complete: %d total (%d regular%s). Saved to %s",
-            collected, regular_count, inv_detail, slug_runs_file,
+            len(self._slugs), regular_count, inv_detail, slug_runs_file,
         )
 
     def _finish_all_collection(self):
@@ -547,88 +546,104 @@ class OtodomSpider(scrapy.Spider):
     # ─── Phase 2 detail parser ───────────────────────────────────
 
     def parse_detail(self, response):
+        ad = self._extract_ad(response)
+        if ad is None:
+            return
+        item = self._build_listing_item(ad, response)
+        self._log_detail_progress()
+        yield item
+        yield self._build_raw_item(ad, item)
+
+    def _extract_ad(self, response) -> dict | None:
+        """Parse __NEXT_DATA__ and return the ad dict, or None on any failure."""
         next_data_raw = response.css("script#__NEXT_DATA__::text").get()
         if not next_data_raw:
-            return
+            return None
         try:
             data = json.loads(next_data_raw)
         except json.JSONDecodeError:
-            return
-
+            return None
         ad = data.get("props", {}).get("pageProps", {}).get("ad")
         if not ad:
             self.logger.warning("No ad data (soft 404?): %s", response.url)
-            return
+        return ad or None
 
-        images = ad.get("images", [])
+    def _build_listing_item(self, ad: dict, response) -> RawListingItem:
+        """Map an ad dict to a RawListingItem via ItemLoader."""
         photo_urls = [
             img.get("large", img.get("medium", ""))
-            for img in images
-            if img
+            for img in ad.get("images", []) if img
         ]
-        chars = {
-            c["key"]: c["value"]
-            for c in ad.get("characteristics", [])
-            if "key" in c
-        }
+        chars = {c["key"]: c["value"] for c in ad.get("characteristics", []) if "key" in c}
         features_str = str(ad.get("features", []))
-
-        item = RawListingItem()
-        item["source_portal"] = "otodom"
-        item["source_url"] = response.url
-        item["external_id"] = str(ad.get("id", ""))
-        item["title"] = ad.get("title", "")
-        item["description"] = ad.get("description", "")
-        item["city"] = self.area.city.capitalize()
-
         loc = ad.get("location", {}).get("address", {})
-        item["district"] = (loc.get("district") or {}).get("name")
-        item["street"] = (loc.get("street") or {}).get("name")
-
         coords = ad.get("location", {}).get("coordinates", {})
-        item["latitude"] = coords.get("latitude")
-        item["longitude"] = coords.get("longitude")
-
-        item["price_pln"] = self._extract_price(ad.get("totalPrice"))
-        item["price_per_m2"] = self._extract_price(ad.get("pricePerSquareMeter"))
-        item["area_m2"] = self._safe_float(chars.get("m")) or ad.get("areaInSquareMeters")
-        item["rooms"] = self._safe_int(chars.get("rooms_num")) or ad.get("roomsNumber")
-        item["floor"] = self._parse_floor(chars.get("floor_no"))
-        item["total_floors"] = self._safe_int(chars.get("building_floors_num"))
-        item["year_built"] = self._safe_int(chars.get("build_year"))
-
-        item["has_lift"] = chars.get("lift") == "yes"
-        item["has_balcony"] = "balcony" in features_str
-        item["has_terrace"] = "terrace" in features_str
-        item["has_storage"] = "basement" in features_str
-        item["heating_type"] = chars.get("heating")
-        item["parking"] = chars.get("parking")
-        item["building_material"] = chars.get("building_material")
-
         raw_type = ((ad.get("target") or {}).get("ProperType") or "").lower()
-        item["property_type"] = _PROPERTY_TYPE_MAP.get(raw_type, "to be checked" if raw_type else None)
-        item["market_type"] = ad.get("market")
-        item["listing_type"] = "agency" if ad.get("agency") else "private"
-        item["date_posted"] = ad.get("dateCreated")
-        item["date_scraped"] = datetime.now(timezone.utc).isoformat()
 
-        item["photo_urls"] = photo_urls
-        item["photo_count"] = len(photo_urls)
-        item["description_length"] = len(item["description"])
-        item["has_floor_plan"] = any(
+        loader = ItemLoader(item=RawListingItem(), response=response)
+        loader.default_output_processor = TakeFirst()
+
+        loader.add_value("source_portal", "otodom")
+        loader.add_value("source_url", response.url)
+        loader.add_value("external_id", str(ad.get("id", "")))
+        loader.add_value("title", ad.get("title", ""))
+        loader.add_value("description", ad.get("description", ""))
+        loader.add_value("city", self.area.city.capitalize())
+        loader.add_value("district", (loc.get("district") or {}).get("name"))
+        loader.add_value("street", (loc.get("street") or {}).get("name"))
+        loader.add_value("latitude", coords.get("latitude"))
+        loader.add_value("longitude", coords.get("longitude"))
+        loader.add_value("price_pln", self._extract_price(ad.get("totalPrice")))
+        loader.add_value("price_per_m2", self._extract_price(ad.get("pricePerSquareMeter")))
+        loader.add_value("area_m2", self._safe_float(chars.get("m")) or ad.get("areaInSquareMeters"))
+        loader.add_value("rooms", self._safe_int(chars.get("rooms_num")) or ad.get("roomsNumber"))
+        loader.add_value("floor", self._parse_floor(chars.get("floor_no")))
+        loader.add_value("total_floors", self._safe_int(chars.get("building_floors_num")))
+        loader.add_value("year_built", self._safe_int(chars.get("build_year")))
+        loader.add_value("has_lift", chars.get("lift") == "yes")
+        loader.add_value("has_balcony", "balcony" in features_str)
+        loader.add_value("has_terrace", "terrace" in features_str)
+        loader.add_value("has_storage", "basement" in features_str)
+        loader.add_value("heating_type", chars.get("heating"))
+        loader.add_value("parking", chars.get("parking"))
+        loader.add_value("building_material", chars.get("building_material"))
+        loader.add_value("property_type", _PROPERTY_TYPE_MAP.get(raw_type, "to be checked" if raw_type else None))
+        loader.add_value("market_type", ad.get("market"))
+        loader.add_value("listing_type", "agency" if ad.get("agency") else "private")
+        loader.add_value("date_posted", ad.get("dateCreated"))
+        loader.add_value("date_scraped", datetime.now(timezone.utc).isoformat())
+        loader.add_value("photo_urls", photo_urls)
+        loader.add_value("photo_count", len(photo_urls))
+        loader.add_value("description_length", len(ad.get("description", "")))
+        loader.add_value("has_floor_plan", any(
             "plan" in (u or "").lower() or "rzut" in (u or "").lower()
             for u in photo_urls
-        )
-        item["raw_json"] = ad
+        ))
 
+        item = loader.load_item()
+        item["photo_urls"] = photo_urls  # Identity() skips empty lists; always a list
+        # Fields set downstream (e.g. PhotoDownload pipeline) default to None
+        for field_name in item.fields:
+            if field_name not in item:
+                item[field_name] = None
+        return item
+
+    @staticmethod
+    def _build_raw_item(ad: dict, listing_item: RawListingItem) -> RawJsonItem:
+        """Wrap the raw ad dict in a RawJsonItem linked to its listing."""
+        raw_item = RawJsonItem()
+        raw_item["external_id"] = listing_item.get("external_id")
+        raw_item["source_url"] = listing_item.get("source_url")
+        raw_item["raw_json"] = ad
+        return raw_item
+
+    def _log_detail_progress(self) -> None:
+        """Log Phase 2 scrape progress every 10% or at least every 25 pages."""
         self._detail_scraped += 1
         done, total = self._detail_scraped, self._detail_total
-        # Log every 10%, but at least every 25 pages
         step = max(25, total // 10)
         if done % step == 0 or done == total:
             self.logger.info("Phase 2: %d/%d detail pages scraped", done, total)
-
-        yield item
 
     # ─── Static helpers ──────────────────────────────────────────
 
@@ -691,5 +706,5 @@ class OtodomSpider(scrapy.Spider):
                     "Spider completed in %.1f seconds. Reason: %s",
                     runtime_seconds, reason
                 )
-            except Exception as e:
-                self.logger.error("Failed to write completion record: %s", e)
+            except OSError as e:
+                self.logger.exception("Failed to write completion record: %s", e)
