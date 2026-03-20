@@ -8,7 +8,14 @@ logger = logging.getLogger(__name__)
 
 class ValidationPipeline:
     def open_spider(self, spider):
-        self._reject_file = open(f"rejected_{spider.name}.jsonl", "a", encoding="utf-8")
+        # Use spider's run_dir if available, otherwise fallback to current directory
+        if hasattr(spider, 'run_dir'):
+            spider.run_dir.mkdir(parents=True, exist_ok=True)
+            reject_path = spider.run_dir / f"rejected_{spider.name}.jsonl"
+            self._reject_file = open(reject_path, "a", encoding="utf-8")
+            spider.logger.debug("ValidationPipeline writing to %s", reject_path)
+        else:
+            self._reject_file = open(f"rejected_{spider.name}.jsonl", "a", encoding="utf-8")
 
     def close_spider(self, spider):
         self._reject_file.close()
