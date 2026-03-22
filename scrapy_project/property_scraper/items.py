@@ -67,5 +67,8 @@ class RawListingItem(scrapy.Item):
     photo_count = Field()
     photo_paths = Field()         # list[str] — MinIO object keys (set by pipeline)
 
+    # ─── Scraping metadata ───────────────────────────────────────
+    http_status = Field()            # HTTP status code of the detail page (200, 404, etc.)
+
     # ─── Raw data ────────────────────────────────────────────────
     # raw_json lives in RawJsonItem (written to raw_output.jsonl) — not here.
