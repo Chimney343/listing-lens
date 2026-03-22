@@ -19,6 +19,17 @@ scrape-otodom-dom-1:
 scrape-otodom-full:
     cd scrapy_project; poetry run scrapy crawl otodom
 
+# Scrape Dębica (Podkarpackie, Dębicki powiat, gmina‑miejska‑‑dębica)
+scrape-debica:
+    cd scrapy_project; poetry run scrapy crawl otodom \
+        -a city=debica \
+        -a voivodeship=podkarpackie \
+        -a powiat=debicki \
+        -a gmina=gmina-miejska--debica \
+        -a property_type=mieszkanie \
+        -a max_pages= \
+        -a phase1_only=0
+
 # ─── Testing ────────────────────────────────────────────────────────────────
 
 # Run all otodom spider tests (sequential)
