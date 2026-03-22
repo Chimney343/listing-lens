@@ -1,6 +1,6 @@
-# Property Pipeline — Kraków
+# listing-lens
 
-Automated system to scrape, deduplicate, store, score, and track property listings in Kraków, Poland.
+Automated system to scrape, deduplicate, store, score, and track property listings advertised in Poland. Focused on Otodom, Gratka, and Morizon portals. Built with Scrapy, PostgreSQL.
 
 ## Codebase Memory (codebase-memory-mcp)
 

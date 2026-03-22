@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 @dataclass
@@ -9,13 +10,13 @@ class SearchArea:
     gmina: str = "gmina-miejska--mielec"
     property_type: str = "mieszkanie"  # mieszkanie | dom | dzialka | etc.
     districts: list[str] = field(default_factory=list)  # empty = all
-    price_min: int | None = None
-    price_max: int | None = None
-    area_min: float | None = None
-    area_max: float | None = None
-    rooms_min: int | None = None
-    rooms_max: int | None = None
-    max_pages: int | None = None  # None means no limit, scrape all pages
+    price_min: Optional[int] = None
+    price_max: Optional[int] = None
+    area_min: Optional[float] = None
+    area_max: Optional[float] = None
+    rooms_min: Optional[int] = None
+    rooms_max: Optional[int] = None
+    max_pages: Optional[int] = None  # None means no limit, scrape all pages
 
 
 OTODOM_DISTRICT_SLUGS = {

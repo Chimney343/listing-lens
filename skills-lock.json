@@ -41,6 +41,11 @@
       "sourceType": "github",
       "computedHash": "5a0b73f9cf738b980678fe98fbc9f9549320258fe097226de87b3afbf31f03fd"
     },
+    "python-project-structure": {
+      "source": "wshobson/agents",
+      "sourceType": "github",
+      "computedHash": "a9c8b41e1a906a59d574c34e889d655c5dcc5137d13528ba02e5da3943d87f5b"
+    },
     "python-resilience": {
       "source": "wshobson/agents",
       "sourceType": "github",

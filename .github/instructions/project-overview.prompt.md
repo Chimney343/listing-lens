@@ -1,8 +1,8 @@
-# Kraków Property Search Pipeline — Project Overview
+# listing-lens — Project Overview
 
 ## Identity and Scope
 
-This is the reference document for the Kraków Property Search Pipeline — a Python-based system that periodically scrapes real estate listings from Polish property portals, deduplicates them, scores them via LLM, and surfaces recommendations with red flags and composite scores through a feedback-driven CLI.
+This is the reference document for the listing-lens — a Python-based system that periodically scrapes real estate listings from Polish property portals, deduplicates them, scores them via LLM, and surfaces recommendations with red flags and composite scores through a feedback-driven CLI.
 
 ---
 

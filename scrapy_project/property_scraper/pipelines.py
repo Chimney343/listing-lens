@@ -1,7 +1,10 @@
 import json
 import logging
+from pathlib import Path
+from typing import Any, Optional, Union
 
 import scrapy
+from scrapy import Spider
 
 from property_scraper.items import RawListingItem
 
@@ -9,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class ValidationPipeline:
-    def open_spider(self, spider):
+    def open_spider(self, spider: Spider) -> None:
         # Use spider's run_dir if available, otherwise fallback to current directory
         if hasattr(spider, 'run_dir'):
             spider.run_dir.mkdir(parents=True, exist_ok=True)
@@ -19,10 +22,12 @@ class ValidationPipeline:
         else:
             self._reject_file = open(f"rejected_{spider.name}.jsonl", "a", encoding="utf-8")
 
-    def close_spider(self, spider):
+    def close_spider(self, spider: Spider) -> None:
         self._reject_file.close()
 
-    def process_item(self, item, spider=None):
+    def process_item(
+        self, item: Any, spider: Optional[Spider] = None
+    ) -> Union[Any, scrapy.Item]:
         if not isinstance(item, RawListingItem):
             return item
         reason = None
@@ -45,7 +50,9 @@ class ValidationPipeline:
 class PhotoDownloadPipeline:
     """Stub — full implementation in Stage 3 (Storage / MinIO)."""
 
-    def process_item(self, item, spider=None):
+    def process_item(
+        self, item: Any, spider: Optional[Spider] = None
+    ) -> Union[Any, scrapy.Item]:
         if not isinstance(item, RawListingItem):
             return item
         item["photo_paths"] = []
@@ -55,7 +62,9 @@ class PhotoDownloadPipeline:
 class DatabasePipeline:
     """Stub — full implementation in Stage 3 (Storage / PostgreSQL)."""
 
-    def process_item(self, item, spider=None):
+    def process_item(
+        self, item: Any, spider: Optional[Spider] = None
+    ) -> Union[Any, scrapy.Item]:
         if not isinstance(item, RawListingItem):
             return item
         logger.debug("DatabasePipeline stub: %s", item.get("source_url"))
