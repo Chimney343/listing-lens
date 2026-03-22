@@ -9,7 +9,14 @@ from itemloaders.processors import TakeFirst
 from scrapy.loader import ItemLoader
 from scrapy_playwright.page import PageMethod
 
-from otodom_config import OtodomSpiderConfig
+try:
+    from otodom_config import OtodomSpiderConfig
+except ImportError:
+    # Fallback for when running from scrapy_project directory
+    import sys
+    sys.path.insert(0, '..')
+    from otodom_config import OtodomSpiderConfig
+
 from property_scraper.area_config import SearchArea, build_otodom_url
 from property_scraper.items import RawListingItem, RawJsonItem
 
@@ -222,9 +229,9 @@ class OtodomSpider(scrapy.Spider):
                 gmina=gmina,
                 property_type=property_type,
                 districts=[d.strip() for d in districts.split(",") if d.strip()],
-                price_min=int(price_min) if price_min else None,
-                price_max=int(price_max) if price_max else None,
-                max_pages=int(max_pages) if max_pages else None,
+                price_min=int(price_min) if price_min and price_min.lower() != 'null' else None,
+                price_max=int(price_max) if price_max and price_max.lower() != 'null' else None,
+                max_pages=int(max_pages) if max_pages and max_pages.lower() != 'null' else None,
             )
         self._detail_scraped: int = 0
         self._detail_total: int = 0
@@ -619,6 +626,7 @@ class OtodomSpider(scrapy.Spider):
             "plan" in (u or "").lower() or "rzut" in (u or "").lower()
             for u in photo_urls
         ))
+        loader.add_value("http_status", response.status)
 
         item = loader.load_item()
         item["photo_urls"] = photo_urls  # Identity() skips empty lists; always a list

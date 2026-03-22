@@ -375,6 +375,70 @@ class TestSpiderInitialization:
             assert spider._parameters[key] == value
 
 
+    def test_null_string_handling(self):
+        """Test that 'null' string parameters are converted to None."""
+        spider = OtodomSpider(
+            city="test",
+            voivodeship="test",
+            powiat="test",
+            gmina="test",
+            property_type="mieszkanie",
+            districts="",
+            price_min="null",
+            price_max="NULL",
+            max_pages="Null",
+            phase1_only="0",
+        )
+        
+        # price_min="null" should become None
+        assert spider.area.price_min is None
+        
+        # price_max="NULL" (uppercase) should become None
+        assert spider.area.price_max is None
+        
+        # max_pages="Null" (mixed case) should become None
+        assert spider.area.max_pages is None
+        
+        # Verify parameters are stored as strings
+        assert spider._parameters["price_min"] == "null"
+        assert spider._parameters["price_max"] == "NULL"
+        assert spider._parameters["max_pages"] == "Null"
+        
+        # Test that empty string also becomes None
+        spider2 = OtodomSpider(
+            city="test",
+            voivodeship="test",
+            powiat="test",
+            gmina="test",
+            property_type="mieszkanie",
+            districts="",
+            price_min="",
+            price_max="",
+            max_pages="",
+            phase1_only="0",
+        )
+        assert spider2.area.price_min is None
+        assert spider2.area.price_max is None
+        assert spider2.area.max_pages is None
+        
+        # Test that numeric strings still convert correctly
+        spider3 = OtodomSpider(
+            city="test",
+            voivodeship="test",
+            powiat="test",
+            gmina="test",
+            property_type="mieszkanie",
+            districts="",
+            price_min="500000",
+            price_max="1000000",
+            max_pages="10",
+            phase1_only="0",
+        )
+        assert spider3.area.price_min == 500000
+        assert spider3.area.price_max == 1000000
+        assert spider3.area.max_pages == 10
+
+
 class TestStartMethod:
     """Test the start method."""
 
