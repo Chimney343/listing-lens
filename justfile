@@ -7,28 +7,39 @@ set shell := ["powershell", "-Command"]
 # Make root-level modules (e.g. otodom_config) importable when scrapy runs from scrapy_project/
 export PYTHONPATH := justfile_directory()
 
-# Scrape first page of Otodom only (quick test / preview)
-scrape-otodom-1:
-    cd scrapy_project; poetry run scrapy crawl otodom -a max_pages=1
+# Collect slugs from page 1 only (quick test / preview)
+scrape-otodom-slugs-1:
+    cd scrapy_project; poetry run scrapy crawl otodom_slugs -a max_pages=1
 
-# Scrape first page of Otodom — dom (house) listings
+# Collect slugs — dom (house) listings, page 1
 scrape-otodom-dom-1:
-    cd scrapy_project; poetry run scrapy crawl otodom -a max_pages=1 -a property_type=dom
+    cd scrapy_project; poetry run scrapy crawl otodom_slugs -a max_pages=1 -a property_type=dom
 
-# Scrape Otodom with default settings (full run)
-scrape-otodom-full:
-    cd scrapy_project; poetry run scrapy crawl otodom
+# Collect all slugs with default settings (full run)
+scrape-otodom-slugs-full:
+    cd scrapy_project; poetry run scrapy crawl otodom_slugs
+
+# Scrape detail pages for a comma-separated list of slugs
+# Usage: just scrape-otodom-detail slugs=slug1,slug2,...
+scrape-otodom-detail slugs="":
+    cd scrapy_project; poetry run scrapy crawl otodom_detail -a slugs={{slugs}}
+
+# Chain slug collection + detail scraping, 1 page (quick local end-to-end test)
+chain-otodom-1:
+    poetry run python chain_otodom.py --max-pages 1
+
+# Chain slug collection + detail scraping, full run
+chain-otodom-full:
+    poetry run python chain_otodom.py
 
 # Scrape Dębica (Podkarpackie, Dębicki powiat, gmina‑miejska‑‑dębica)
 scrape-debica:
-    cd scrapy_project; poetry run scrapy crawl otodom \
-        -a city=debica \
-        -a voivodeship=podkarpackie \
-        -a powiat=debicki \
-        -a gmina=gmina-miejska--debica \
-        -a property_type=mieszkanie \
-        -a max_pages= \
-        -a phase1_only=0
+    poetry run python chain_otodom.py \
+        --city debica \
+        --voivodeship podkarpackie \
+        --powiat debicki \
+        --gmina gmina-miejska--debica \
+        --property-type mieszkanie
 
 # ─── Testing ────────────────────────────────────────────────────────────────
 
