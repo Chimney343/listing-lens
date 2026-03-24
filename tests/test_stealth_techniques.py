@@ -5,7 +5,8 @@ import pytest
 from scrapy.http import TextResponse, Request
 
 from property_scraper.spiders.otodom import (
-    OtodomSpider,
+    OtodomSlugSpider,
+    OtodomDetailSpider,
     _STEALTH_SCRIPT,
     _CAPTURE_FETCH_SCRIPT,
     _UNITS_FETCH_SCRIPT,
@@ -112,7 +113,7 @@ class TestSpiderRequestStealth:
     @pytest.mark.asyncio
     async def test_start_requests_include_stealth(self):
         """Test that start requests include playwright stealth meta."""
-        spider = OtodomSpider(slug="test-offer-123")
+        spider = OtodomDetailSpider(slug="test-offer-123")
         
         requests = []
         async for request in spider.start():
@@ -127,17 +128,14 @@ class TestSpiderRequestStealth:
         assert "playwright_page_init_callback" in request.meta
         assert request.meta["playwright_page_init_callback"] == _page_init
 
-    def test_detail_requests_include_stealth(self):
+    @pytest.mark.asyncio
+    async def test_detail_requests_include_stealth(self):
         """Test that detail page requests include stealth meta."""
-        spider = OtodomSpider()
-        spider._slugs = {"test-slug-1", "test-slug-2"}
-        spider._investments = {}
-        spider._total_items = 10
-        spider.settings = {"DATA_DIR": "/tmp"}
+        spider = OtodomDetailSpider(city="Warszawa", slugs="test-slug-1,test-slug-2")
         
-        # Mock _persist_slug_run to avoid file operations
-        with patch.object(spider, '_persist_slug_run'):
-            requests = list(spider._finish_all_collection())
+        requests = []
+        async for request in spider.start():
+            requests.append(request)
         
         assert len(requests) == 2
         for request in requests:
@@ -189,7 +187,7 @@ class TestSettingsConfiguration:
 
     def test_spider_inherits_settings(self):
         """Test that spider instance has access to stealth settings."""
-        spider = OtodomSpider()
+        spider = OtodomSlugSpider()
         
         # Create a mock crawler with settings
         mock_crawler = Mock()
@@ -213,7 +211,7 @@ class TestIntegrationStealth:
 
     def test_complete_request_flow(self):
         """Test that a request goes through all stealth layers."""
-        spider = OtodomSpider()
+        spider = OtodomDetailSpider()
         
         # Create a request as the spider would
         request = Request(
@@ -234,7 +232,7 @@ class TestIntegrationStealth:
 
     def test_investment_request_flow(self):
         """Test that investment requests include additional stealth layers."""
-        spider = OtodomSpider()
+        spider = OtodomSlugSpider()
         
         # Create an investment request as the spider would
         request = Request(
@@ -259,7 +257,7 @@ class TestErrorHandlingStealth:
 
     def test_error_requests_still_stealthy(self):
         """Test that retry requests after errors maintain stealth config."""
-        spider = OtodomSpider()
+        spider = OtodomDetailSpider()
         
         # Simulate a request that will be retried
         request = Request(
