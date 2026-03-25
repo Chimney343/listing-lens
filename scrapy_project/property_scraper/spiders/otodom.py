@@ -3,9 +3,12 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from uuid import uuid4
 
 import scrapy
+import structlog
 from itemloaders.processors import TakeFirst
+from scrapy.exceptions import CloseSpider
 from scrapy.loader import ItemLoader
 from scrapy_playwright.page import PageMethod
 
@@ -18,7 +21,12 @@ except ImportError:
     from otodom_config import OtodomSpiderConfig
 
 from property_scraper.area_config import SearchArea, build_otodom_url
-from property_scraper.items import RawListingItem, RawJsonItem
+from property_scraper.items import (
+    RawListingItem,
+    RawJsonItem,
+    SlugCollectionItem,
+    SlugRunMetaItem,
+)
 
 
 _STEALTH_SCRIPT = """
@@ -123,7 +131,7 @@ class OtodomSlugSpider(scrapy.Spider):
 
     Handles investment expansion (phase 1.5) internally — no detail pages
     are visited and no RawListingItem is yielded.  After completion the full
-    slug list is written to run_dir/slug_runs.jsonl so that OtodomDetailSpider
+    slug list is written to run_dir/slug_run_meta.jsonl so that OtodomDetailSpider
     (or the scheduler) can pick it up.
 
     Usage:
@@ -137,6 +145,19 @@ class OtodomSlugSpider(scrapy.Spider):
     def from_crawler(cls, crawler, *args, **kwargs):
         spider = super().from_crawler(crawler, *args, **kwargs)
         spider.run_dir.mkdir(parents=True, exist_ok=True)
+        slug_path = str(spider.run_dir / "slug_collection.jsonl")
+        crawler.settings.set(
+            "FEEDS",
+            {
+                slug_path: {
+                    "format": "jsonlines",
+                    "encoding": "utf-8",
+                    "overwrite": True,
+                    "item_classes": [SlugCollectionItem],
+                },
+            },
+            priority="spider",
+        )
         return spider
 
     def __init__(
@@ -156,13 +177,15 @@ class OtodomSlugSpider(scrapy.Spider):
     ):
         super().__init__(**kwargs)
 
+        self._log = structlog.get_logger(type(self).__name__).bind(spider=self.name)
+
         if config_file is not None:
             try:
                 from otodom_config import load_config_from_file
                 config = load_config_from_file(config_file)
-                self.logger.info("Loaded config from file: %s", config_file)
+                self._log.info("Loaded config from file", config_file=config_file)
             except Exception as e:
-                self.logger.error("Failed to load config from %s: %s", config_file, e)
+                self._log.error("Failed to load config", config_file=config_file, error=str(e))
                 raise
 
         if config is not None:
@@ -188,10 +211,11 @@ class OtodomSlugSpider(scrapy.Spider):
             "max_pages": max_pages,
         }
 
+        self._run_id = str(uuid4())
         self.run_timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        self._start_time = None
-        self._end_time = None
+        self._started_at = None
         self._run_dir = None
+        self._investments_found = 0
 
         if config is not None:
             self.area = config.to_search_area()
@@ -218,14 +242,14 @@ class OtodomSlugSpider(scrapy.Spider):
     # ─── Phase 1: collect slugs from all search pages ────────────
 
     async def start(self):
-        self._start_time = datetime.now(timezone.utc)
+        self._started_at = datetime.now(timezone.utc)
         price_range = f"{self.area.price_min or '?'}–{self.area.price_max or '?'} PLN"
-        self.logger.info(
-            "Starting slug collection: city=%s, type=%s, price=%s, max_pages=%s",
-            self.area.city,
-            self.area.property_type,
-            price_range,
-            "all" if self.area.max_pages is None else str(self.area.max_pages),
+        self._log.info(
+            "Starting slug collection",
+            city=self.area.city,
+            property_type=self.area.property_type,
+            price_range=price_range,
+            max_pages="all" if self.area.max_pages is None else str(self.area.max_pages),
         )
         url = build_otodom_url(self.area, page=1)
         yield scrapy.Request(url, callback=self._bootstrap, meta={"page": 1, **_pw_meta()})
@@ -248,75 +272,71 @@ class OtodomSlugSpider(scrapy.Spider):
         self._investments: dict[int, tuple[str, int]] = {}  # ad_id → (slug, expected_units)
         self._search_pages_received: int = 0
 
-        self.logger.info(
-            "Bootstrap: API reports %d items across %d pages%s",
-            self._total_items,
-            total_pages,
-            f" (capped at {self._total_pages})" if self.area.max_pages is not None else "",
+        self._log.info(
+            "Bootstrap",
+            total_items=self._total_items,
+            total_pages=total_pages,
+            capped_at=self._total_pages if self.area.max_pages is not None else None,
         )
-
-        self._absorb_search_items(search_data, page=1)
-        self._search_pages_received += 1
 
         for page in range(2, self._total_pages + 1):
             yield scrapy.Request(
                 build_otodom_url(self.area, page=page),
-                callback=self._collect_slugs,
+                callback=self.parse_search,
                 errback=self._on_search_error,
                 meta={"page": page, **_pw_meta()},
             )
 
-        if self._search_pages_received == self._total_pages:
-            yield from self._finish_search_collection()
+        yield from self.parse_search(response)
 
-    def _collect_slugs(self, response):
-        """Collect slugs from a follow-up search page; trigger next phase when done."""
+    def parse_search(self, response):
+        """Collect slugs from a search page; yield one SlugCollectionItem per new regular slug."""
         search_data = self._parse_search_data(response)
-        if search_data is not None:
-            self._absorb_search_items(search_data, page=response.meta["page"])
-        self._search_pages_received += 1
+        page = response.meta.get("page", 1)
 
+        if search_data is not None:
+            before = len(self._slugs)
+            for item in search_data.get("items", []):
+                slug = item.get("slug", "")
+                if not slug:
+                    continue
+                if item.get("estate") == "INVESTMENT":
+                    ad_id = item.get("id")
+                    if ad_id:
+                        is_new = ad_id not in self._investments
+                        expected = item.get("investmentUnitsNumber", 0)
+                        self._investments[ad_id] = (slug, expected)
+                        if is_new:
+                            self._investments_found += 1
+                            self._log.info(
+                                "Investment detected",
+                                slug=slug,
+                                ad_id=ad_id,
+                                expected_units=expected,
+                            )
+                        else:
+                            self._log.debug(
+                                "Investment re-seen on page",
+                                page=page,
+                                slug=slug,
+                            )
+                else:
+                    if slug not in self._slugs:
+                        self._slugs.add(slug)
+                        yield self._make_slug_item(slug)
+            added = len(self._slugs) - before
+            self._log.info(
+                "Search page processed",
+                page=page,
+                total_pages=self._total_pages,
+                new_slugs=added,
+                total_slugs=len(self._slugs),
+                investments=len(self._investments) if self._investments else 0,
+            )
+
+        self._search_pages_received += 1
         if self._search_pages_received == self._total_pages:
             yield from self._finish_search_collection()
-
-    def _absorb_search_items(self, search_data: dict, page: int) -> None:
-        """Extract slugs from a search page, separating investments from regular listings."""
-        before = len(self._slugs)
-        for item in search_data.get("items", []):
-            slug = item.get("slug", "")
-            if not slug:
-                continue
-            if item.get("estate") == "INVESTMENT":
-                ad_id = item.get("id")
-                if ad_id:
-                    is_new = ad_id not in self._investments
-                    expected = item.get("investmentUnitsNumber", 0)
-                    self._investments[ad_id] = (slug, expected)
-                    if is_new:
-                        self.logger.info(
-                            "  Investment detected: %s (id=%s, %d units)",
-                            slug,
-                            ad_id,
-                            expected,
-                        )
-                    else:
-                        self.logger.debug(
-                            "  Investment re-seen on page %d: %s", page, slug
-                        )
-            else:
-                self._slugs.add(slug)
-        added = len(self._slugs) - before
-        inv_part = (
-            f", {len(self._investments)} investment(s)" if self._investments else ""
-        )
-        self.logger.info(
-            "Search page %d/%d: +%d slugs (total: %d%s)",
-            page,
-            self._total_pages,
-            added,
-            len(self._slugs),
-            inv_part,
-        )
 
     # ─── Phase 1.5: expand investments into unit slugs ───────────
 
@@ -324,18 +344,18 @@ class OtodomSlugSpider(scrapy.Spider):
         """After all search pages collected, expand investments or finish."""
         listing_count = len(self._slugs)
         investment_count = len(self._investments)
-        self.logger.info(
-            "Search complete: %d listing slugs + %d investments",
-            listing_count,
-            investment_count,
+        self._log.info(
+            "Search complete",
+            listing_slugs=listing_count,
+            investments=investment_count,
         )
 
         if investment_count > 0:
             total_expected_units = sum(u for _, u in self._investments.values())
-            self.logger.info(
-                "Phase 1.5: expanding %d investment(s) — %d units expected",
-                investment_count,
-                total_expected_units,
+            self._log.info(
+                "Expanding investments",
+                investment_count=investment_count,
+                total_expected_units=total_expected_units,
             )
             self._investment_responses_pending = investment_count
             for ad_id, (inv_slug, expected_units) in self._investments.items():
@@ -360,6 +380,7 @@ class OtodomSlugSpider(scrapy.Spider):
         expected_units = response.meta["expected_units"]
 
         self._slugs.add(inv_slug)
+        yield self._make_slug_item(inv_slug)
 
         result = None
         for pm in response.meta.get("playwright_page_methods", []):
@@ -368,14 +389,16 @@ class OtodomSlugSpider(scrapy.Spider):
                 break
 
         if not result or result.get("error"):
-            self.logger.error(
-                "Investment %s (id=%d): could not fetch units via API (%s) "
-                "— falling back to HTML link extraction",
-                inv_slug,
-                ad_id,
-                result,
+            self._log.error(
+                "Investment units API failed, falling back to HTML",
+                inv_slug=inv_slug,
+                ad_id=ad_id,
+                api_result=result,
             )
+            before = set(self._slugs)
             self._extract_units_from_html(response, inv_slug)
+            for new_slug in (self._slugs - before):
+                yield self._make_slug_item(new_slug)
             self._investment_responses_pending -= 1
             if self._investment_responses_pending == 0:
                 self._finish_all_collection()
@@ -386,24 +409,27 @@ class OtodomSlugSpider(scrapy.Spider):
         total = len(items)
 
         if expected_units and total != expected_units:
-            self.logger.warning(
-                "Investment %s: expected %d units but API returned %d",
-                inv_slug,
-                expected_units,
-                total,
+            self._log.warning(
+                "Investment unit count mismatch",
+                inv_slug=inv_slug,
+                expected_units=expected_units,
+                actual_units=total,
             )
 
         for unit in items:
             unit_url = unit.get("url", "")
             if unit_url:
-                self._slugs.add(unit_url.rstrip("/").split("/")[-1])
+                unit_slug = unit_url.rstrip("/").split("/")[-1]
+                if unit_slug not in self._slugs:
+                    self._slugs.add(unit_slug)
+                    yield self._make_slug_item(unit_slug)
 
-        self.logger.info(
-            "Investment %s: %d/%d units collected (hash %.8s…)",
-            inv_slug,
-            total,
-            expected_units or total,
-            sha256_hash,
+        self._log.info(
+            "Investment units collected",
+            inv_slug=inv_slug,
+            units_collected=total,
+            units_expected=expected_units or total,
+            sha256_hash_prefix=sha256_hash[:8] if sha256_hash else None,
         )
 
         self._investment_responses_pending -= 1
@@ -420,92 +446,57 @@ class OtodomSlugSpider(scrapy.Spider):
                 unit_slugs.add(m.group(1))
         unit_slugs.discard(inv_slug)
         self._slugs.update(unit_slugs)
-        self.logger.warning(
-            "Investment %s: HTML fallback collected %d unit slugs (may be incomplete)",
-            inv_slug,
-            len(unit_slugs),
+        self._log.warning(
+            "HTML fallback collected unit slugs (may be incomplete)",
+            inv_slug=inv_slug,
+            unit_slugs_found=len(unit_slugs),
         )
 
     # ─── Error handlers ──────────────────────────────────────────
 
     def _on_search_error(self, failure):
         """Handle failed search page request."""
-        self.logger.error("Search page request failed: %s", failure.value)
+        self._log.error("Search page request failed", error=str(failure.value))
         self._search_pages_received += 1
         if self._search_pages_received == self._total_pages:
             yield from self._finish_search_collection()
 
     def _on_investment_error(self, failure):
         """Handle failed investment page load."""
-        self.logger.error("Investment page request failed: %s", failure.value)
+        self._log.error("Investment page request failed", error=str(failure.value))
         self._investment_responses_pending -= 1
         if self._investment_responses_pending == 0:
             self._finish_all_collection()
 
-    # ─── Slug persistence ─────────────────────────────────────────
-
-    def _build_slug_run_record(self) -> dict:
-        investment_count = len(self._investments)
-        return {
-            "run_id": self.run_timestamp,
-            "run_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "record_type": "slug_collection",
-            "parameters": self._parameters,
-            "city": self.area.city,
-            "total_advertised": self._total_items,
-            "investments_found": investment_count,
-            "investment_slugs": {
-                str(k): {"slug": slug, "expected_units": units}
-                for k, (slug, units) in self._investments.items()
-            },
-            "slug_count": len(self._slugs),
-            "slugs": sorted(self._slugs),
-        }
-
-    def _persist_slug_run(self) -> None:
-        record = self._build_slug_run_record()
-        self.run_dir.mkdir(parents=True, exist_ok=True)
-        slug_runs_file = self.run_dir / "slug_runs.jsonl"
-        with open(slug_runs_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record) + "\n")
-
-        investment_count = len(self._investments)
-        total_investment_slugs = (
-            sum(u for _, u in self._investments.values()) + investment_count
-        )
-        regular_count = len(self._slugs) - total_investment_slugs
-        inv_detail = (
-            f" + {total_investment_slugs} from {investment_count} investment(s)"
-            if investment_count
-            else ""
-        )
-        self.logger.info(
-            "Slug collection complete: %d total (%d regular%s). Saved to %s",
-            len(self._slugs),
-            regular_count,
-            inv_detail,
-            slug_runs_file,
-        )
-
     def _finish_all_collection(self):
-        """All slugs and investments resolved.  Persist and stop."""
-        self._persist_slug_run()
-        self.logger.info(
-            "Done. Run detail spider:  scrapy crawl otodom_detail -a city=%s -a slugs=<paste from slug_runs.jsonl>",
-            self.area.city,
+        """All slugs and investments resolved."""
+        self._log.info(
+            "Done. Run detail spider",
+            city=self.area.city,
+            hint="scrapy crawl otodom_detail -a city=<city> -a slug_collection_file=<path to slug_collection.jsonl>",
         )
 
     # ─── Shared helpers ──────────────────────────────────────────
 
+    def _make_slug_item(self, slug: str) -> SlugCollectionItem:
+        """Build a SlugCollectionItem for a single slug."""
+        item = SlugCollectionItem()
+        item["id"] = str(uuid4())
+        item["run_id"] = self._run_id
+        item["portal"] = "otodom"
+        item["slug"] = slug
+        item["full_url"] = f"https://www.otodom.pl/pl/oferta/{slug}"
+        return item
+
     def _parse_search_data(self, response) -> dict | None:
         next_data_raw = response.css("script#__NEXT_DATA__::text").get()
         if not next_data_raw:
-            self.logger.warning("No __NEXT_DATA__ on %s", response.url)
+            self._log.warning("No __NEXT_DATA__ found", url=response.url)
             return None
         try:
             data = json.loads(next_data_raw)
         except json.JSONDecodeError:
-            self.logger.error("JSON decode failed: %s", response.url)
+            self._log.error("JSON decode failed", url=response.url)
             return None
         return (
             data.get("props", {})
@@ -515,30 +506,34 @@ class OtodomSlugSpider(scrapy.Spider):
         )
 
     def closed(self, reason):
-        self._end_time = datetime.now(timezone.utc)
-        if hasattr(self, "run_dir") and self.run_dir and self._start_time:
+        self._ended_at = datetime.now(timezone.utc)
+        if hasattr(self, "run_dir") and self.run_dir and self._started_at:
             try:
-                slug_runs_file = self.run_dir / "slug_runs.jsonl"
-                runtime_seconds = (self._end_time - self._start_time).total_seconds()
-                completion_record = {
-                    "run_id": self.run_timestamp,
-                    "start_time": self._start_time.isoformat(timespec="seconds"),
-                    "end_time": self._end_time.isoformat(timespec="seconds"),
-                    "runtime_seconds": runtime_seconds,
-                    "runtime_human": f"{runtime_seconds:.1f}s",
-                    "parameters": self._parameters,
-                    "completion_reason": reason,
-                    "record_type": "completion",
-                }
-                with open(slug_runs_file, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(completion_record) + "\n")
-                self.logger.info(
-                    "Spider completed in %.1f seconds. Reason: %s",
-                    runtime_seconds,
-                    reason,
+                self.run_dir.mkdir(parents=True, exist_ok=True)
+                slug_run_meta_file = self.run_dir / "slug_run_meta.jsonl"
+                runtime_seconds = (self._ended_at - self._started_at).total_seconds()
+                slug_run = SlugRunMetaItem()
+                slug_run["run_id"] = self._run_id
+                slug_run["portal"] = "otodom"
+                slug_run["city"] = self.area.city
+                slug_run["started_at"] = self._started_at.isoformat(timespec="seconds")
+                slug_run["ended_at"] = self._ended_at.isoformat(timespec="seconds")
+                slug_run["runtime_seconds"] = runtime_seconds
+                slug_run["completion_reason"] = reason
+                slug_run["parameters"] = self._parameters
+                slug_run["total_advertised"] = getattr(self, "_total_items", 0)
+                slug_run["investments_found"] = getattr(self, "_investments_found", 0)
+                slug_run["slug_count"] = len(getattr(self, "_slugs", set()))
+                with open(slug_run_meta_file, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(dict(slug_run)) + "\n")
+                self._log.info(
+                    "Spider completed",
+                    runtime_seconds=round(runtime_seconds, 1),
+                    reason=reason,
+                    slug_count=slug_run["slug_count"],
                 )
             except OSError as e:
-                self.logger.exception("Failed to write completion record: %s", e)
+                self._log.error("Failed to write run record", error=str(e), exc_info=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -553,8 +548,8 @@ class OtodomDetailSpider(scrapy.Spider):
     1. **Single-slug mode**: ``-a slug=some-slug``.
     2. **Inline mode**: ``-a slugs=slug1,slug2,...`` or ``-a slugs_file=/path/to/slugs.txt``
        (one slug per line). ``slugs_file`` avoids Windows CLI length limits.
-    3. **Slug-run file mode**: ``-a slug_run_file=/path/to/slug_runs.jsonl``.
-       Reads the ``slug_collection`` record written by :class:`OtodomSlugSpider`
+    3. **Slug collection file mode**: ``-a slug_collection_file=/path/to/slug_collection.jsonl``.
+       Reads the ``SlugCollectionItem`` records written by :class:`OtodomSlugSpider`
        and scrapes every slug it contains.  This is the canonical hand-off
        between the two spiders when running locally via ``chain_otodom.py``.
     4. **Database mode** (not yet implemented): when none of the above are
@@ -565,7 +560,7 @@ class OtodomDetailSpider(scrapy.Spider):
         scrapy crawl otodom_detail -a slug=some-listing-slug
         scrapy crawl otodom_detail -a slugs=slug1,slug2,...
         scrapy crawl otodom_detail -a slugs_file=/tmp/slugs.txt
-        scrapy crawl otodom_detail -a slug_run_file=data/otodom/20260324_215403/slug_runs.jsonl
+        scrapy crawl otodom_detail -a slug_collection_file=data/otodom/20260324_215403/slug_collection.jsonl
     """
 
     name = "otodom_detail"
@@ -603,14 +598,14 @@ class OtodomDetailSpider(scrapy.Spider):
         slugs: str = "",
         slug: str | None = None,
         slugs_file: str = "",
-        slug_run_file: str = "",
+        slug_collection_file: str = "",
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.city = city
         self.single_slug = slug
-        if slug_run_file:
-            self._slugs_list: list[str] = self._read_slug_run_file(slug_run_file)
+        if slug_collection_file:
+            self._slugs_list: list[str] = self._read_slug_collection_file(slug_collection_file)
         elif slugs_file:
             slugs_path = Path(slugs_file)
             with open(slugs_path, encoding="utf-8") as f:
@@ -623,6 +618,7 @@ class OtodomDetailSpider(scrapy.Spider):
         self._run_dir = None
         self._detail_scraped = 0
         self._detail_total = 0
+        self._log = structlog.get_logger(type(self).__name__).bind(spider=self.name)
 
     @property
     def run_dir(self) -> Path:
@@ -635,7 +631,7 @@ class OtodomDetailSpider(scrapy.Spider):
         self._start_time = datetime.now(timezone.utc)
 
         if self.single_slug:
-            self.logger.info("Single-slug mode: scraping %s", self.single_slug)
+            self._log.info("Single-slug mode", slug=self.single_slug)
             self._detail_total = 1
             yield scrapy.Request(
                 f"https://www.otodom.pl/pl/oferta/{self.single_slug}",
@@ -647,10 +643,10 @@ class OtodomDetailSpider(scrapy.Spider):
 
         if self._slugs_list:
             self._detail_total = len(self._slugs_list)
-            self.logger.info(
-                "Inline mode: scraping %d slugs (city=%s)",
-                self._detail_total,
-                self.city or "unset",
+            self._log.info(
+                "Inline mode",
+                slug_count=self._detail_total,
+                city=self.city or "unset",
             )
             for slug in self._slugs_list:
                 yield scrapy.Request(
@@ -662,27 +658,32 @@ class OtodomDetailSpider(scrapy.Spider):
             return
 
         # DB mode — not yet implemented
-        self.logger.error(
-            "No slugs provided and database mode is not yet implemented. "
-            "Pass -a slugs=slug1,slug2,... or -a slug=single-slug."
+        self._log.error(
+            "No slugs provided and database mode not yet implemented",
+            hint="Pass -a slugs=slug1,slug2,... or -a slug=single-slug",
         )
+        raise CloseSpider("db_mode_not_implemented")
 
     @staticmethod
-    def _read_slug_run_file(path: str) -> list[str]:
-        """Extract the slug list from a slug_runs.jsonl produced by OtodomSlugSpider."""
+    def _read_slug_collection_file(path: str) -> list[str]:
+        """Extract slug strings from a slug_collection.jsonl produced by OtodomSlugSpider."""
         p = Path(path)
+        slugs: list[str] = []
         with open(p, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
                 record = json.loads(line)
-                if record.get("record_type") == "slug_collection":
-                    return record.get("slugs", [])
-        raise ValueError(
-            f"No 'slug_collection' record found in {path}. "
-            "Make sure otodom_slugs has completed successfully."
-        )
+                slug = record.get("slug")
+                if slug:
+                    slugs.append(slug)
+        if not slugs:
+            raise ValueError(
+                f"No slug records found in {path}. "
+                "Make sure otodom_slugs has completed successfully."
+            )
+        return slugs
 
     # ─── Detail parsing ───────────────────────────────────────────
 
@@ -705,7 +706,7 @@ class OtodomDetailSpider(scrapy.Spider):
             return None
         ad = data.get("props", {}).get("pageProps", {}).get("ad")
         if not ad:
-            self.logger.warning("No ad data (soft 404?): %s", response.url)
+            self._log.warning("No ad data (soft 404?)", url=response.url)
         return ad or None
 
     def _build_listing_item(self, ad: dict, response) -> RawListingItem:
@@ -801,15 +802,17 @@ class OtodomDetailSpider(scrapy.Spider):
         done, total = self._detail_scraped, self._detail_total
         step = max(25, total // 10)
         if done % step == 0 or done == total:
-            self.logger.info(
-                "Detail scrape: %d/%d pages done", done, total
+            self._log.info(
+                "Detail scrape progress",
+                done=done,
+                total=total,
             )
 
     def _on_detail_error(self, failure):
-        self.logger.error(
-            "Detail page request failed: %s — %s",
-            failure.request.url,
-            failure.value,
+        self._log.error(
+            "Detail page request failed",
+            url=failure.request.url,
+            error=str(failure.value),
         )
 
     # ─── Static helpers ──────────────────────────────────────────
@@ -865,12 +868,12 @@ class OtodomDetailSpider(scrapy.Spider):
                 }
                 with open(detail_runs_file, "a", encoding="utf-8") as f:
                     f.write(json.dumps(completion_record) + "\n")
-                self.logger.info(
-                    "Detail spider completed in %.1f seconds (%d/%d items). Reason: %s",
-                    runtime_seconds,
-                    self._detail_scraped,
-                    self._detail_total,
-                    reason,
+                self._log.info(
+                    "Detail spider completed",
+                    runtime_seconds=round(runtime_seconds, 1),
+                    items_scraped=self._detail_scraped,
+                    items_total=self._detail_total,
+                    reason=reason,
                 )
             except OSError as e:
-                self.logger.exception("Failed to write detail run record: %s", e)
+                self._log.error("Failed to write detail run record", error=str(e), exc_info=True)

@@ -14,6 +14,30 @@ class RawJsonItem(scrapy.Item):
     external_id = Field()   # links back to RawListingItem
     source_url  = Field()
     raw_json    = Field()   # the full ad dict straight from __NEXT_DATA__
+class SlugRunMetaItem(scrapy.Item):
+    """Run metadata written once in closed(). Matches the slug_runs table."""
+
+    run_id = Field()
+    portal = Field()
+    city = Field()
+    started_at = Field()
+    ended_at = Field()
+    runtime_seconds = Field()
+    completion_reason = Field()
+    parameters = Field()
+    total_advertised = Field()
+    investments_found = Field()
+    slug_count = Field()
+
+
+class SlugCollectionItem(scrapy.Item):
+    """Spider-populated fields for a new slug row, yielded once per discovered slug."""
+
+    id = Field()        # UUID assigned at collection time
+    run_id = Field()
+    portal = Field()
+    slug = Field()
+    full_url = Field()
 
 
 class RawListingItem(scrapy.Item):

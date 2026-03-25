@@ -44,21 +44,24 @@ def _latest_run_dir() -> Path | None:
 
 
 def _read_slugs(run_dir: Path) -> list[str]:
-    """Extract slug list from slug_runs.jsonl in run_dir (for count reporting only)."""
-    slug_file = run_dir / "slug_runs.jsonl"
-    if not slug_file.exists():
-        print(f"[chain] ERROR: {slug_file} not found", file=sys.stderr)
+    """Extract slug list from slug_collection.jsonl in run_dir (for count reporting only)."""    
+    output_file = run_dir / "slug_collection.jsonl"
+    if not output_file.exists():
+        print(f"[chain] ERROR: {output_file} not found", file=sys.stderr)
         return []
-    with open(slug_file, encoding="utf-8") as f:
+    slugs: list[str] = []
+    with open(output_file, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             record = json.loads(line)
-            if record.get("record_type") == "slug_collection":
-                return record.get("slugs", [])
-    print(f"[chain] ERROR: no slug_collection record in {slug_file}", file=sys.stderr)
-    return []
+            slug = record.get("slug")
+            if slug:
+                slugs.append(slug)
+    if not slugs:
+        print(f"[chain] ERROR: no slug records found in {output_file}", file=sys.stderr)
+    return slugs
 
 
 def main() -> None:
@@ -106,10 +109,9 @@ def main() -> None:
     print(f"[chain] Collected {len(slugs)} slugs from {run_dir.name}")
 
     # ── Phase 2: scrape details ───────────────────────────────────────────────
-    # Pass the slug_runs.jsonl path directly — OtodomDetailSpider parses it,
-    # avoiding any CLI length limit.
-    slug_run_file = str(run_dir / "slug_runs.jsonl")
-    detail_args = ["-a", f"slug_run_file={slug_run_file}"]
+    # Pass the slug_collection.jsonl path directly — OtodomDetailSpider reads SlugCollectionItem records.
+    slug_collection_file = str(run_dir / "slug_collection.jsonl")
+    detail_args = ["-a", f"slug_collection_file={slug_collection_file}"]
     if opts.city:
         detail_args += ["-a", f"city={opts.city}"]
 
