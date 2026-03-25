@@ -1,5 +1,7 @@
-# property_scraper/settings.py
+"""Scrapy settings for the property scraper project."""
 
+import os
+import sys
 from pathlib import Path
 
 BOT_NAME = "property_scraper"
@@ -117,6 +119,32 @@ ROBOTSTXT_OBEY = False  # Portals block scrapers via robots.txt
 # ─── LOGGING ─────────────────────────────────────────────────
 LOG_LEVEL = "INFO"
 LOG_ENCODING = "utf-8"
+LOG_FORMAT = "%(asctime)s [%(name)s] %(levelname)s: %(message)s"
+LOG_DATEFORMAT = "%Y-%m-%d %H:%M:%S"
+
+# Silence loggers that produce per-item/per-request debug noise.
+# scrapy.core.scraper dumps the full item repr after each scrape — redundant
+# since items are already written to output.jsonl.
+import logging as _logging
+_logging.getLogger("scrapy.core.scraper").setLevel(_logging.WARNING)
+_logging.getLogger("scrapy.core.engine").setLevel(_logging.WARNING)
+_logging.getLogger("scrapy-playwright").setLevel(_logging.WARNING)
+_logging.getLogger("playwright").setLevel(_logging.WARNING)
+
+LOG_DIR = Path(__file__).resolve().parents[2] / "logs"
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from logging_config import configure_logging
+    configure_logging(
+        log_level=LOG_LEVEL,
+        log_dir=LOG_DIR,
+        json_format=False,  # Set to True in production
+        enable_file_logging=True,
+    )
+except ImportError:
+    pass  # Fall back to Scrapy's default logging
 
 # ─── FEED EXPORT ─────────────────────────────────────────────
 FEED_EXPORT_ENCODING = "utf-8"
@@ -125,5 +153,5 @@ FEED_EXPORT_ENCODING = "utf-8"
 ITEM_PIPELINES = {
     "property_scraper.pipelines.ValidationPipeline": 100,
     "property_scraper.pipelines.PhotoDownloadPipeline": 300,
-    "property_scraper.pipelines.DatabasePipeline": 400,
+    # "property_scraper.pipelines.DatabasePipeline": 400,
 }
