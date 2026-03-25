@@ -1,6 +1,7 @@
 ﻿"""Unit and integration tests for OtodomSlugSpider and OtodomDetailSpider."""
 import json
 from unittest.mock import Mock, patch, AsyncMock
+from datetime import datetime, timezone
 
 import pytest
 import scrapy
@@ -8,7 +9,12 @@ from scrapy.http import Response, Request, TextResponse
 from scrapy.utils.test import get_crawler
 
 from property_scraper.spiders.otodom import OtodomSlugSpider, OtodomDetailSpider
-from property_scraper.items import RawListingItem, RawJsonItem
+from property_scraper.items import (
+    RawListingItem,
+    RawJsonItem,
+    SlugCollectionItem,
+    SlugRunMetaItem,
+)
 
 
 # ─── Fixtures ──────────────────────────────────────────────────────────────
@@ -135,6 +141,10 @@ def mock_response_with_json(sample_search_json):
         url="https://www.otodom.pl/pl/wyniki/wynajem/mieszkanie/krakow",
         body=html.encode("utf-8"),
         encoding="utf-8",
+        request=Request(
+            "https://www.otodom.pl/pl/wyniki/wynajem/mieszkanie/krakow",
+            meta={"page": 1},
+        ),
     )
 
 
@@ -217,67 +227,96 @@ class TestParseSearchData:
         assert result is None
 
 
-class TestAbsorbSearchItems:
-    """Test the _absorb_search_items method on OtodomSlugSpider."""
+class TestParseSearch:
+    """Test the parse_search method on OtodomSlugSpider."""
 
-    def test_absorb_search_items_regular(self, spider):
+    def _make_response(self, items_data, page=1):
+        search_json = {
+            "props": {
+                "pageProps": {
+                    "data": {
+                        "searchAds": {
+                            "pagination": {"totalItems": 10, "totalPages": 5},
+                            "items": items_data,
+                        }
+                    }
+                }
+            }
+        }
+        html = f'<script id="__NEXT_DATA__">{json.dumps(search_json)}</script>'
+        return TextResponse(
+            url=f"https://www.otodom.pl/?page={page}",
+            body=html.encode("utf-8"),
+            encoding="utf-8",
+            request=Request(f"https://www.otodom.pl/?page={page}", meta={"page": page}),
+        )
+
+    def _init_spider(self, spider):
         spider._slugs = set()
         spider._investments = {}
+        spider._investments_found = 0
+        spider._search_pages_received = 0
         spider._total_pages = 5
-        search_data = {
-            "items": [
-                {"slug": "listing-1", "estate": "REGULAR"},
-                {"slug": "listing-2", "estate": "REGULAR"},
-            ]
-        }
-        spider._absorb_search_items(search_data, page=1)
-        assert len(spider._slugs) == 2
+
+    def test_parse_search_regular_slugs(self, spider):
+        self._init_spider(spider)
+        response = self._make_response([
+            {"slug": "listing-1", "estate": "REGULAR"},
+            {"slug": "listing-2", "estate": "REGULAR"},
+        ])
+        items = list(spider.parse_search(response))
+        assert len(items) == 2
+        assert all(isinstance(it, SlugCollectionItem) for it in items)
+        assert {it["slug"] for it in items} == {"listing-1", "listing-2"}
         assert "listing-1" in spider._slugs
         assert "listing-2" in spider._slugs
-        assert len(spider._investments) == 0
 
-    def test_absorb_search_items_investment(self, spider):
-        spider._slugs = set()
-        spider._investments = {}
-        spider._total_pages = 5
-        search_data = {
-            "items": [
-                {
-                    "id": 999,
-                    "slug": "investment-1",
-                    "estate": "INVESTMENT",
-                    "investmentUnitsNumber": 30,
-                }
-            ]
-        }
-        spider._absorb_search_items(search_data, page=1)
-        assert len(spider._slugs) == 0  # Investment slugs not added yet
+    def test_parse_search_slug_item_fields(self, spider):
+        self._init_spider(spider)
+        response = self._make_response([{"slug": "listing-abc", "estate": "REGULAR"}])
+        items = list(spider.parse_search(response))
+        assert len(items) == 1
+        item = items[0]
+        assert item["run_id"] == spider._run_id
+        assert item["portal"] == "otodom"
+        assert item["slug"] == "listing-abc"
+        assert item["full_url"] == "https://www.otodom.pl/pl/oferta/listing-abc"
+        assert item["id"] is not None  # UUID string
+
+    def test_parse_search_investment_no_slug_item(self, spider):
+        self._init_spider(spider)
+        response = self._make_response([{
+            "id": 999, "slug": "investment-1",
+            "estate": "INVESTMENT", "investmentUnitsNumber": 30,
+        }])
+        items = list(spider.parse_search(response))
+        assert len(items) == 0
+        assert len(spider._slugs) == 0
         assert len(spider._investments) == 1
-        assert 999 in spider._investments
+        assert spider._investments_found == 1
         assert spider._investments[999] == ("investment-1", 30)
 
-    def test_absorb_search_items_mixed(self, spider):
-        spider._slugs = set()
-        spider._investments = {}
-        spider._total_pages = 5
-        search_data = {
-            "items": [
-                {"slug": "regular-1", "estate": "REGULAR"},
-                {
-                    "id": 100,
-                    "slug": "investment-1",
-                    "estate": "INVESTMENT",
-                    "investmentUnitsNumber": 20,
-                },
-                {"slug": "regular-2", "estate": "REGULAR"},
-            ]
-        }
-        spider._absorb_search_items(search_data, page=1)
-        assert len(spider._slugs) == 2
-        assert len(spider._investments) == 1
-        assert "regular-1" in spider._slugs
-        assert "regular-2" in spider._slugs
+    def test_parse_search_mixed(self, spider):
+        self._init_spider(spider)
+        response = self._make_response([
+            {"slug": "regular-1", "estate": "REGULAR"},
+            {"id": 100, "slug": "investment-1", "estate": "INVESTMENT", "investmentUnitsNumber": 20},
+            {"slug": "regular-2", "estate": "REGULAR"},
+        ])
+        items = list(spider.parse_search(response))
+        assert len(items) == 2
+        assert all(isinstance(it, SlugCollectionItem) for it in items)
+        assert {it["slug"] for it in items} == {"regular-1", "regular-2"}
         assert spider._investments[100] == ("investment-1", 20)
+
+    def test_parse_search_no_duplicate_slugs(self, spider):
+        self._init_spider(spider)
+        spider._slugs.add("listing-1")
+        response = self._make_response([
+            {"slug": "listing-1", "estate": "REGULAR"},
+        ])
+        items = list(spider.parse_search(response))
+        assert len(items) == 0  # already seen
 
 
 # ─── Integration Tests for Spider Flow ─────────────────────────────────────
@@ -319,38 +358,41 @@ class TestSpiderInitialization:
         assert spider._slugs_list == ["slug-a", "slug-b", "slug-c"]
         assert spider.single_slug is None
 
-    def test_detail_spider_slug_run_file(self, tmp_path):
-        """Detail spider reads slugs from a slug_runs.jsonl file."""
+    def test_detail_spider_slug_collection_file(self, tmp_path):
+        """Detail spider reads slugs from a slug_collection.jsonl file."""
         import json
-        slug_file = tmp_path / "slug_runs.jsonl"
-        slug_file.write_text(
-            json.dumps({
-                "record_type": "slug_collection",
-                "slugs": ["run-slug-1", "run-slug-2", "run-slug-3"],
-            }) + "\n",
-            encoding="utf-8",
-        )
-        spider = OtodomDetailSpider(slug_run_file=str(slug_file))
+        collection_file = tmp_path / "slug_collection.jsonl"
+        lines = [
+            json.dumps({"id": "uuid-1", "run_id": "r1", "portal": "otodom", "slug": "run-slug-1", "full_url": "https://www.otodom.pl/pl/oferta/run-slug-1"}),
+            json.dumps({"id": "uuid-2", "run_id": "r1", "portal": "otodom", "slug": "run-slug-2", "full_url": "https://www.otodom.pl/pl/oferta/run-slug-2"}),
+            json.dumps({"id": "uuid-3", "run_id": "r1", "portal": "otodom", "slug": "run-slug-3", "full_url": "https://www.otodom.pl/pl/oferta/run-slug-3"}),
+        ]
+        collection_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        spider = OtodomDetailSpider(slug_collection_file=str(collection_file))
         assert spider._slugs_list == ["run-slug-1", "run-slug-2", "run-slug-3"]
 
-    def test_detail_spider_slug_run_file_missing_record(self, tmp_path):
-        """Detail spider raises if no slug_collection record is present."""
+    def test_detail_spider_slug_collection_file_empty(self, tmp_path):
+        """Detail spider raises if no slug records are found in the collection file."""
         import json
-        slug_file = tmp_path / "slug_runs.jsonl"
-        slug_file.write_text(
+        collection_file = tmp_path / "slug_collection.jsonl"
+        collection_file.write_text(
             json.dumps({"record_type": "completion"}) + "\n",
             encoding="utf-8",
         )
-        with pytest.raises(ValueError, match="slug_collection"):
-            OtodomDetailSpider(slug_run_file=str(slug_file))
+        with pytest.raises(ValueError, match="No slug records found"):
+            OtodomDetailSpider(slug_collection_file=str(collection_file))
 
     def test_run_timestamp_set_at_construction(self):
-        for cls in (OtodomSlugSpider, OtodomDetailSpider):
-            spider = cls()
-            assert spider.run_timestamp is not None
-            assert len(spider.run_timestamp) == 15  # yyyyMMdd_HHmmss
-            assert spider._start_time is None
-            assert spider._end_time is None
+        slug_spider = OtodomSlugSpider()
+        assert slug_spider.run_timestamp is not None
+        assert len(slug_spider.run_timestamp) == 15  # yyyyMMdd_HHmmss
+        assert slug_spider._started_at is None
+
+        detail_spider = OtodomDetailSpider()
+        assert detail_spider.run_timestamp is not None
+        assert len(detail_spider.run_timestamp) == 15
+        assert detail_spider._start_time is None
+        assert detail_spider._end_time is None
 
     def test_slug_spider_parameters_stored(self):
         spider = OtodomSlugSpider(
@@ -464,10 +506,10 @@ class TestBootstrapMethod:
             with patch('property_scraper.spiders.otodom.build_otodom_url') as mock_url:
                 mock_url.return_value = "https://example.com/page=2"
                 results = list(spider._bootstrap(mock_response_with_json))
-                # Pages 2 and 3 (max_pages=5 but only 3 total)
-                assert len(results) == 2
-                assert all(isinstance(r, Request) for r in results)
-                assert results[0].callback == spider._collect_slugs
+                # Pages 2 and 3 (max_pages=5 but only 3 total); plus SlugCollectionItems from page 1
+                requests = [r for r in results if isinstance(r, Request)]
+                assert len(requests) == 2
+                assert requests[0].callback == spider.parse_search
 
     def test_bootstrap_no_data(self, spider, mock_response_with_json):
         with patch.object(spider, '_parse_search_data', return_value=None):
@@ -591,39 +633,83 @@ class TestInvestmentHandling:
         assert "unit-4" in spider._slugs
         assert "investment-slug" not in spider._slugs
 
-    def test_finish_all_collection_yields_nothing(self, spider, tmp_path):
-        """Slug spider always stops after persisting — never yields detail requests."""
+    def test_on_investment_page_yields_slug_items(self, spider):
+        """_on_investment_page yields SlugCollectionItems for parent + all units."""
+        spider._slugs = set()
+        spider._investment_responses_pending = 1
+        spider._run_id = "test-run"
+
+        page_methods_result = {
+            "sha256Hash": "abc123",
+            "items": [
+                {"url": "https://www.otodom.pl/pl/oferta/unit-a"},
+                {"url": "https://www.otodom.pl/pl/oferta/unit-b"},
+            ],
+        }
+        mock_page_method = Mock()
+        mock_page_method.method = "evaluate"
+        mock_page_method.result = page_methods_result
+
+        response = TextResponse(
+            url="https://www.otodom.pl/pl/inwestycja/inv-parent",
+            body=b"<html></html>",
+            encoding="utf-8",
+            request=Request(
+                "https://www.otodom.pl/pl/inwestycja/inv-parent",
+                meta={
+                    "ad_id": 999,
+                    "inv_slug": "inv-parent",
+                    "expected_units": 2,
+                    "playwright_page_methods": [mock_page_method],
+                },
+            ),
+        )
+
+        with patch.object(spider, "_finish_all_collection"):
+            items = list(spider._on_investment_page(response))
+
+        slug_items = [it for it in items if isinstance(it, SlugCollectionItem)]
+        slugs_yielded = {it["slug"] for it in slug_items}
+        assert "inv-parent" in slugs_yielded
+        assert "unit-a" in slugs_yielded
+        assert "unit-b" in slugs_yielded
+        assert len(slug_items) == 3
+        assert all(it["portal"] == "otodom" for it in slug_items)
+        assert all(it["id"] is not None for it in slug_items)
+        assert all("otodom.pl/pl/oferta/" in it["full_url"] for it in slug_items)
+
+    def test_finish_all_collection_returns_nothing(self, spider):
+        """_finish_all_collection no longer yields items; it only logs."""
         spider._slugs = {"slug1", "slug2"}
         spider._investments = {123: ("inv-slug", 10)}
-        spider._total_items = 100
+        result = spider._finish_all_collection()
+        assert result is None
 
-        spider.settings = {"DATA_DIR": str(tmp_path)}
-        spider.run_timestamp = "test_timestamp"
-
-        spider._finish_all_collection()
-
-        slug_runs_file = tmp_path / "otodom" / "test_timestamp" / "slug_runs.jsonl"
-        assert slug_runs_file.exists()
-
-    def test_finish_all_collection_record_content(self, spider, tmp_path):
-        """slug_runs.jsonl contains expected fields."""
+    def test_closed_writes_slug_run_meta_item(self, spider, tmp_path):
+        """closed() writes a SlugRunMetaItem record to slug_run_meta.jsonl."""
         spider._slugs = {"slug1", "slug2", "slug3"}
         spider._investments = {}
+        spider._investments_found = 0
         spider._total_items = 50
-
+        spider._started_at = datetime(2026, 3, 25, 10, 19, 45, tzinfo=timezone.utc)
         spider.settings = {"DATA_DIR": str(tmp_path)}
         spider.run_timestamp = "test_timestamp"
 
-        spider._finish_all_collection()
+        spider.closed("finished")
 
-        slug_runs_file = tmp_path / "otodom" / "test_timestamp" / "slug_runs.jsonl"
-        with open(slug_runs_file) as f:
-            record = json.loads(f.readline())
-
-        assert record["record_type"] == "slug_collection"
+        slug_run_meta_file = tmp_path / "otodom" / "test_timestamp" / "slug_run_meta.jsonl"
+        assert slug_run_meta_file.exists()
+        with open(slug_run_meta_file, encoding="utf-8") as f:
+            records = [json.loads(line) for line in f if line.strip()]
+        assert len(records) == 1
+        record = records[0]
+        assert record["run_id"] == spider._run_id
+        assert record["portal"] == "otodom"
+        assert record["city"] == spider.area.city
         assert record["slug_count"] == 3
-        assert set(record["slugs"]) == {"slug1", "slug2", "slug3"}
         assert record["total_advertised"] == 50
+        assert record["investments_found"] == 0
+        assert record["completion_reason"] == "finished"
 
 
 # ─── Test Property Type Mapping ────────────────────────────────────────────
