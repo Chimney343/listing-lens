@@ -150,7 +150,7 @@ Four pipelines are declared in `settings.py` (executed in order):
    *Not yet implemented.* The plan is to compute a hash based on district, area, floor, price, rooms, and street (the same hash used later in the storage layer) and drop duplicates within the same run.
 
 3. **PhotoDownloadPipeline**  
-   *Stub.* Eventually will download each photo URL, store the binary in MinIO, and replace `photo_urls` with a list of MinIO object keys stored in `photo_paths`.
+   *Stub.* Eventually will download each photo URL, store the binary via `PhotoStorage.put()`, and replace `photo_urls` with a list of storage keys in `photo_paths`.
 
 4. **DatabasePipeline**  
    *Stub.* Will insert the validated, deduplicated listing into PostgreSQL (synchronous `psycopg` connection).
@@ -174,7 +174,7 @@ Spiders check for these markers and skip yielding an item when detected. This pr
 | Otodom changes the `__NEXT_DATA__` structure or migrates to React Server Components (RSC) flight data. | Monitor for zero‑item runs; consider adding `njsparser` as a fallback for RSC parsing. |
 | `scrapy‑impersonate` TLS profiles become stale (portals start rejecting them). | Keep the library updated; fall back to `scrapy‑playwright` for all requests. |
 | Gratka/Morizon change their HTML selectors. | Selectors are defined as class‑level constants; a single update in the spider file will fix all parsing. |
-| `CrawlerProcess.start()` calls `reactor.run()` only once, making it difficult to run multiple spiders sequentially inside a scheduler. | Use `CrawlerRunner` with asyncio for scheduler integration; spiders are already prepared for this via the `async start()` method. |
+| `CrawlerProcess.start()` calls `reactor.run()` only once, making it difficult to run multiple spiders sequentially inside a scheduler. | Spiders are launched via `subprocess.run()` from APScheduler jobs to avoid Twisted reactor conflicts. Never call `CrawlerProcess` or `CrawlerRunner` inside a scheduler job. |
 | Investment‑unit API interception fails because Otodom changes the fetch‑interception pattern. | The HTML fallback will still extract a subset of unit slugs (those linked directly on the page). |
 
 ## Testing Approach

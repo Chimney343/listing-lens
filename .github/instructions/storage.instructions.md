@@ -226,6 +226,8 @@ Photos are the only part of the storage layer that changes between local and clo
 
 The key format is always `{portal}/{external_id}/{filename}.jpg`, regardless of backend. This mirrors S3 object key conventions so that a local key and an S3 key are structurally identical. Migration from filesystem to S3 is an `aws s3 sync` command plus a config change, not a key remapping operation.
 
+> **TODO**: Confirm whether the key includes a `listings/` path prefix (e.g. `listings/{portal}/{external_id}/{filename}.jpg`) or starts directly with `{portal}/`. Align `project-overview.prompt.md` and this document once decided.
+
 ### `FilesystemPhotoStorage`
 
 The local implementation. Accepts a `base_path: Path` at construction (the NVMe mount point, e.g. `/mnt/nvme/photos`). `put` writes bytes to `base_path / key`, creating parent directories as needed. `get` reads and returns the file at `base_path / key`. Raises `FileNotFoundError` (not a generic exception) if the key does not exist. This is a concrete, testable class with no external dependencies.

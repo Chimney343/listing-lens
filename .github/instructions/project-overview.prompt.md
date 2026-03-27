@@ -123,8 +123,12 @@ PostgreSQL and photos both live on the NVMe. No object store is needed locally.
 key would look like at migration time:
 
 ```
-/mnt/nvme/photos/listings/{portal}/{external_id}/{filename}.jpg
+# TODO: confirm whether key includes 'listings/' prefix or starts directly with {portal}/
+# Option A: /mnt/nvme/photos/listings/{portal}/{external_id}/{filename}.jpg
+# Option B: /mnt/nvme/photos/{portal}/{external_id}/{filename}.jpg
 ```
+
+Align this with `storage.instructions.md` once decided.
 
 The pipeline interacts with photos exclusively through a `PhotoStorage`
 interface:

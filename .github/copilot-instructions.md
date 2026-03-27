@@ -4,9 +4,14 @@ Automated system to scrape, deduplicate, store, score, and track property listin
 
 ## Codebase Memory (codebase-memory-mcp)
 
-When this MCP server is available, prefer graph tools over grep/file search 
-for structural code questions. Graph queries return precise results in a single 
-tool call vs file-by-file exploration.
+**BLOCKING REQUIREMENT**: At the start of EVERY conversation involving structural
+code questions, you MUST first call `tool_search_tool_regex` with pattern `mcp_codebase`
+to load the graph tools. These are deferred tools — they are NOT available until
+discovered via `tool_search_tool_regex`. Calling them without loading first will fail.
+
+For ALL structural code questions (who calls X, what does X call, find functions by
+pattern, dead code analysis, cross-service HTTP calls, REST routes), you MUST use
+graph tools. Never substitute grep, file search, or read_file for structural questions.
 
 ### Indexing
 - Always use repo_path="/mnt/c/Users/mkkom/listing-lens"
@@ -31,13 +36,13 @@ tool call vs file-by-file exploration.
 
 ## Architecture
 
-Scrapy spiders → Dedup (SHA-256 hash) → PostgreSQL + MinIO → LLM scoring → Feedback loop
+Scrapy spiders → Dedup (SHA-256 hash) → PostgreSQL + NVMe filesystem → LLM scoring → Feedback loop
 
 ## Tech Stack
 
 - **Scraping**: Scrapy + `scrapy-impersonate` (TLS/JA3 spoofing) + `scrapy-fake-useragent` + AutoThrottle
 - **Database**: Self-hosted PostgreSQL via `psycopg` (sync). All DB calls are synchronous — no async/await on DB methods.
-- **Photo storage**: MinIO (S3-compatible, self-hosted). Store actual photo binary files, never just URLs.
+- **Photo storage**: NVMe filesystem via `PhotoStorage` protocol (`put`/`get`). Abstracted for future S3 migration. Store actual photo binary files, never just URLs.
 - **LLM scoring**: `instructor` + Pydantic v2 for structured output. Provider-agnostic (Claude, OpenAI, Gemini, Ollama).
 - **Scheduling**: APScheduler. Scrapy spiders launched via `subprocess.run()` to avoid Twisted reactor issues.
 - **Config**: `pydantic-settings` + `.env`
@@ -66,8 +71,32 @@ Scrapy spiders → Dedup (SHA-256 hash) → PostgreSQL + MinIO → LLM scoring �
 ## Project Layout
 
 ```
-property-pipeline/
+listing-lens/
 ├── .github/                    # Copilot instructions + prompts
+├── alembic/                    # Alembic migration scripts
+│   └── versions/
+├── data/                       # Spider run output (gitignored)
+├── logs/                       # Structured log files (gitignored)
+├── tests/                      # pytest test suite
+├── logging_config.py           # Shared structured logging (structlog)
+├── storage/
+│   ├── __init__.py
+│   ├── db.py                   # psycopg SQL helpers (sync)
+│   ├── photos.py               # PhotoStorage protocol + implementations  # TODO: Stage 3
+│   └── models.py               # Shared Pydantic models                   # TODO: Stage 3
+├── scoring/                    # TODO: Stage 5
+│   ├── schemas.py
+│   ├── adapter.py
+│   ├── prompts.py
+│   └── scorer.py
+├── feedback/                   # TODO: Stage 6
+│   ├── feedback.py
+│   └── cli.py
+├── scheduler/                  # TODO: Stage 4
+│   └── jobs.py
+├── config/
+│   └── .env.example
+├── main.py                     # TODO: Stage 4 — APScheduler entry point
 ├── scrapy_project/
 │   ├── scrapy.cfg
 │   └── property_scraper/
@@ -80,22 +109,5 @@ property-pipeline/
 │           ├── otodom.py
 │           ├── gratka.py
 │           └── morizon.py
-├── storage/
-│   ├── db.py                   # psycopg DatabaseClient (sync)
-│   ├── photos.py               # MinIO PhotoManager
-│   └── models.py
-├── scoring/
-│   ├── schemas.py              # ListingScore Pydantic model
-│   ├── adapter.py              # LLMAdapter (instructor)
-│   ├── prompts.py              # SCORING_SYSTEM_PROMPT
-│   └── scorer.py               # ListingScorer orchestration
-├── feedback/
-│   ├── feedback.py             # FeedbackManager
-│   └── cli.py                  # typer CLI (view_top, record, analyze)
-├── scheduler/
-│   └── jobs.py                 # APScheduler + subprocess spider launch
-├── config/
-│   ├── settings.py             # StorageSettings (pydantic-settings)
-│   └── .env.example
-└── main.py
+└── alembic.ini
 ```
