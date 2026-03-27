@@ -26,3 +26,7 @@ chain-otodom-full:
 # Run all tests (sequential comprehensive)
 test-all:
     poetry run pytest tests/ -v
+
+# Set up .env file with default configuration
+setup-env:
+    @if (Test-Path .env) { Write-Host ".env file already exists. Remove it first or edit manually." -ForegroundColor Yellow } else { "DATABASE_URL=postgresql://listing_lens:choose_a_password@localhost:5432/listing_lens_dev`nPHOTO_STORAGE_BACKEND=filesystem`nPHOTO_STORAGE_PATH=/mnt/nvme/photos" | Out-File -FilePath .env -Encoding utf8; Write-Host ".env file created successfully!" -ForegroundColor Green }
