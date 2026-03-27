@@ -1,12 +1,71 @@
-path = r'c:\Users\mkkom\listing-lens\.github\instructions\scraping.instructions.md'
-content = open(path, encoding='utf-8').read()
+"""
+Script to replace a section in the scraping instructions markdown file.
 
-old_start = content.find('## Otodom Spider Design\n')
-old_end = content.find('\n## Scrapy Pipelines\n')
+This is a one-off utility script for documentation updates.
+Fixes applied:
+- Uses context managers for file operations (no resource leaks)
+- Uses relative paths instead of hard-coded absolute paths
+- Includes type hints for clarity
+"""
+from pathlib import Path
 
-print(f'old_start: {old_start}, old_end: {old_end}, length: {old_end - old_start}')
 
-new_section = '''## Decoupled Spider Architecture
+def replace_markdown_section(
+    file_path: Path,
+    old_section_start: str,
+    old_section_end: str,
+    new_section: str
+) -> None:
+    """
+    Replace a section in a markdown file between two markers.
+    
+    Args:
+        file_path: Path to the markdown file
+        old_section_start: String marker for the start of the old section
+        old_section_end: String marker for the end of the old section
+        new_section: New content to insert (without the end marker)
+    
+    Raises:
+        FileNotFoundError: If the file doesn't exist
+        ValueError: If the section markers are not found
+    """
+    # Read the file using context manager
+    with open(file_path, encoding='utf-8') as f:
+        content = f.read()
+    
+    # Find section boundaries
+    old_start = content.find(old_section_start)
+    old_end = content.find(old_section_end)
+    
+    if old_start == -1:
+        raise ValueError(f"Section start marker not found: {old_section_start}")
+    if old_end == -1:
+        raise ValueError(f"Section end marker not found: {old_section_end}")
+    if old_end <= old_start:
+        raise ValueError("Section end marker appears before start marker")
+    
+    print(f'Found section at positions {old_start} to {old_end} (length: {old_end - old_start})')
+    
+    # Replace the section
+    new_content = content[:old_start] + new_section + content[old_end:]
+    
+    # Write the file using context manager
+    with open(file_path, 'w', encoding='utf-8') as f:
+        f.write(new_content)
+    
+    print(f'Done. New content length: {len(new_content)}')
+
+
+def main() -> None:
+    """Main entry point for the script."""
+    # Use relative path from project root
+    project_root = Path(__file__).parent
+    file_path = project_root / '.github' / 'instructions' / 'scraping.instructions.md'
+    
+    if not file_path.exists():
+        raise FileNotFoundError(f"Instructions file not found: {file_path}")
+    
+    new_section = '''## Decoupled Spider Architecture
 
 Each portal has **two spider classes**, not one:
 
@@ -58,7 +117,7 @@ All collected slugs and the investment map are written to `run_dir/slug_runs.jso
 
 ### Otodom Investment Expansion
 
-For each investment detected, the slug spider loads the investment detail page via Playwright. Before the page loads, a script is injected that patches `window.fetch` to intercept the first API call containing the GraphQL persisted-query hash. Using that hash, the script fetches all unit listings **from within the browser\'s own session** — no separate cookie management required. The unit slugs are extracted and added to the main slug set.
+For each investment detected, the slug spider loads the investment detail page via Playwright. Before the page loads, a script is injected that patches `window.fetch` to intercept the first API call containing the GraphQL persisted-query hash. Using that hash, the script fetches all unit listings **from within the browser's own session** — no separate cookie management required. The unit slugs are extracted and added to the main slug set.
 
 If the API interception fails, a fallback HTML link extraction is performed (less complete but still functional).
 
@@ -91,7 +150,14 @@ Both portals currently have **stubs** for their slug and detail spiders. CSS sel
 - **Morizon** — similarly server-side rendered. Selectors prepared.
 
 Once implemented, each portal will follow the same slug-then-detail split described above, accept the same `SearchArea` `-a` arguments, and feed items through the same pipelines.'''
+    
+    replace_markdown_section(
+        file_path=file_path,
+        old_section_start='## Otodom Spider Design\n',
+        old_section_end='\n## Scrapy Pipelines\n',
+        new_section=new_section
+    )
 
-new_content = content[:old_start] + new_section + content[old_end:]
-open(path, 'w', encoding='utf-8').write(new_content)
-print('Done. New length:', len(new_content))
+
+if __name__ == "__main__":
+    main()

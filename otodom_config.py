@@ -5,6 +5,28 @@ from typing import Optional
 from pydantic import BaseModel, Field, field_validator
 
 
+def _safe_int(value: str | None, field_name: str) -> int | None:
+    """
+    Safely convert string to int with validation.
+    
+    Args:
+        value: String value to convert
+        field_name: Field name for error messages
+        
+    Returns:
+        Integer value or None
+        
+    Raises:
+        ValueError: If value is not a valid integer
+    """
+    if not value:
+        return None
+    try:
+        return int(value)
+    except (ValueError, TypeError) as e:
+        raise ValueError(f"Invalid integer value for {field_name}: {value!r}") from e
+
+
 class OtodomSpiderConfig(BaseModel):
     """Pydantic-compatible configuration for OtodomSpider."""
     
@@ -34,7 +56,11 @@ class OtodomSpiderConfig(BaseModel):
         return self.phase1_only.strip() not in ("0", "false", "")
     
     def to_search_area(self):
-        """Convert config to SearchArea object."""
+        """Convert config to SearchArea object.
+        
+        Raises:
+            ValueError: If price fields or max_pages contain invalid integer values
+        """
         from property_scraper.area_config import SearchArea
         
         return SearchArea(
@@ -44,9 +70,9 @@ class OtodomSpiderConfig(BaseModel):
             gmina=self.gmina,
             property_type=self.property_type,
             districts=[d.strip() for d in self.districts.split(",") if d.strip()],
-            price_min=int(self.price_min) if self.price_min else None,
-            price_max=int(self.price_max) if self.price_max else None,
-            max_pages=int(self.max_pages) if self.max_pages else None,
+            price_min=_safe_int(self.price_min, "price_min"),
+            price_max=_safe_int(self.price_max, "price_max"),
+            max_pages=_safe_int(self.max_pages, "max_pages"),
         )
 
 

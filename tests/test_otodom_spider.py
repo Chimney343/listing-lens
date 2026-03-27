@@ -391,8 +391,8 @@ class TestSpiderInitialization:
         detail_spider = OtodomDetailSpider()
         assert detail_spider.run_timestamp is not None
         assert len(detail_spider.run_timestamp) == 15
-        assert detail_spider._start_time is None
-        assert detail_spider._end_time is None
+        assert detail_spider._started_at is None
+        assert detail_spider._ended_at is None
 
     def test_slug_spider_parameters_stored(self):
         spider = OtodomSlugSpider(
@@ -697,7 +697,7 @@ class TestInvestmentHandling:
 
         spider.closed("finished")
 
-        slug_run_meta_file = tmp_path / "otodom" / "test_timestamp" / "slug_run_meta.jsonl"
+        slug_run_meta_file = tmp_path / "otodom" / "test_timestamp_slugs" / "slug_run_meta.jsonl"
         assert slug_run_meta_file.exists()
         with open(slug_run_meta_file, encoding="utf-8") as f:
             records = [json.loads(line) for line in f if line.strip()]

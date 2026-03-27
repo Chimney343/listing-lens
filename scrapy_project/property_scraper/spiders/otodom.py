@@ -122,6 +122,21 @@ def _pw_meta(investment: bool = False) -> dict:
 _PROPERTY_TYPE_MAP = {"mieszkanie": "apartment", "dom": "house"}
 
 
+def _parse_next_data(response) -> dict | None:
+    """Parse the ``__NEXT_DATA__`` JSON block from an Otodom response.
+
+    Returns the parsed dict, or ``None`` if the script tag is absent or the
+    JSON is malformed.
+    """
+    raw = response.css("script#__NEXT_DATA__::text").get()
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Spider 1 of 2: slug collection
 # ─────────────────────────────────────────────────────────────────────────────
@@ -236,7 +251,7 @@ class OtodomSlugSpider(scrapy.Spider):
     def run_dir(self) -> Path:
         if self._run_dir is None:
             data_dir = Path(self.settings.get("DATA_DIR"))
-            self._run_dir = data_dir / "otodom" / self.run_timestamp
+            self._run_dir = data_dir / "otodom" / f"{self.run_timestamp}_slugs"
         return self._run_dir
 
     # ─── Phase 1: collect slugs from all search pages ────────────
@@ -296,34 +311,8 @@ class OtodomSlugSpider(scrapy.Spider):
 
         if search_data is not None:
             before = len(self._slugs)
-            for item in search_data.get("items", []):
-                slug = item.get("slug", "")
-                if not slug:
-                    continue
-                if item.get("estate") == "INVESTMENT":
-                    ad_id = item.get("id")
-                    if ad_id:
-                        is_new = ad_id not in self._investments
-                        expected = item.get("investmentUnitsNumber", 0)
-                        self._investments[ad_id] = (slug, expected)
-                        if is_new:
-                            self._investments_found += 1
-                            self._log.info(
-                                "Investment detected",
-                                slug=slug,
-                                ad_id=ad_id,
-                                expected_units=expected,
-                            )
-                        else:
-                            self._log.debug(
-                                "Investment re-seen on page",
-                                page=page,
-                                slug=slug,
-                            )
-                else:
-                    if slug not in self._slugs:
-                        self._slugs.add(slug)
-                        yield self._make_slug_item(slug)
+            for raw_item in search_data.get("items", []):
+                yield from self._process_search_item(raw_item, page)
             added = len(self._slugs) - before
             self._log.info(
                 "Search page processed",
@@ -337,6 +326,36 @@ class OtodomSlugSpider(scrapy.Spider):
         self._search_pages_received += 1
         if self._search_pages_received == self._total_pages:
             yield from self._finish_search_collection()
+
+    def _process_search_item(self, item: dict, page: int):
+        """Process a single raw search result item; yield SlugCollectionItem for regular slugs."""
+        slug = item.get("slug", "")
+        if not slug:
+            return
+
+        if item.get("estate") != "INVESTMENT":
+            if slug not in self._slugs:
+                self._slugs.add(slug)
+                yield self._make_slug_item(slug)
+            return
+
+        ad_id = item.get("id")
+        if not ad_id:
+            return
+
+        is_new = ad_id not in self._investments
+        expected = item.get("investmentUnitsNumber", 0)
+        self._investments[ad_id] = (slug, expected)
+        if is_new:
+            self._investments_found += 1
+            self._log.info(
+                "Investment detected",
+                slug=slug,
+                ad_id=ad_id,
+                expected_units=expected,
+            )
+        else:
+            self._log.debug("Investment re-seen on page", page=page, slug=slug)
 
     # ─── Phase 1.5: expand investments into unit slugs ───────────
 
@@ -399,9 +418,7 @@ class OtodomSlugSpider(scrapy.Spider):
             self._extract_units_from_html(response, inv_slug)
             for new_slug in (self._slugs - before):
                 yield self._make_slug_item(new_slug)
-            self._investment_responses_pending -= 1
-            if self._investment_responses_pending == 0:
-                self._finish_all_collection()
+            self._decrement_investment_pending()
             return
 
         sha256_hash = result["sha256Hash"]
@@ -418,11 +435,12 @@ class OtodomSlugSpider(scrapy.Spider):
 
         for unit in items:
             unit_url = unit.get("url", "")
-            if unit_url:
-                unit_slug = unit_url.rstrip("/").split("/")[-1]
-                if unit_slug not in self._slugs:
-                    self._slugs.add(unit_slug)
-                    yield self._make_slug_item(unit_slug)
+            if not unit_url:
+                continue
+            unit_slug = unit_url.rstrip("/").split("/")[-1]
+            if unit_slug not in self._slugs:
+                self._slugs.add(unit_slug)
+                yield self._make_slug_item(unit_slug)
 
         self._log.info(
             "Investment units collected",
@@ -432,19 +450,16 @@ class OtodomSlugSpider(scrapy.Spider):
             sha256_hash_prefix=sha256_hash[:8] if sha256_hash else None,
         )
 
-        self._investment_responses_pending -= 1
-        if self._investment_responses_pending == 0:
-            self._finish_all_collection()
+        self._decrement_investment_pending()
 
     def _extract_units_from_html(self, response, inv_slug: str) -> None:
         """Fallback: scrape unit slugs from <a> tags on the investment page."""
         links = response.css('a[href*="/pl/oferta/"]::attr(href)').getall()
-        unit_slugs = set()
-        for href in links:
-            m = re.search(r"/pl/oferta/([a-zA-Z0-9-]+)", href)
-            if m:
-                unit_slugs.add(m.group(1))
-        unit_slugs.discard(inv_slug)
+        unit_slugs = {
+            m.group(1)
+            for href in links
+            if (m := re.search(r"/pl/oferta/([a-zA-Z0-9-]+)", href))
+        } - {inv_slug}
         self._slugs.update(unit_slugs)
         self._log.warning(
             "HTML fallback collected unit slugs (may be incomplete)",
@@ -455,7 +470,11 @@ class OtodomSlugSpider(scrapy.Spider):
     # ─── Error handlers ──────────────────────────────────────────
 
     def _on_search_error(self, failure):
-        """Handle failed search page request."""
+        """Handle failed search page request.
+
+        Scrapy supports generator errbacks; ``yield from`` below propagates
+        any requests or items returned by ``_finish_search_collection``.
+        """
         self._log.error("Search page request failed", error=str(failure.value))
         self._search_pages_received += 1
         if self._search_pages_received == self._total_pages:
@@ -464,6 +483,10 @@ class OtodomSlugSpider(scrapy.Spider):
     def _on_investment_error(self, failure):
         """Handle failed investment page load."""
         self._log.error("Investment page request failed", error=str(failure.value))
+        self._decrement_investment_pending()
+
+    def _decrement_investment_pending(self) -> None:
+        """Decrement pending investment counter and finish collection when all done."""
         self._investment_responses_pending -= 1
         if self._investment_responses_pending == 0:
             self._finish_all_collection()
@@ -489,14 +512,9 @@ class OtodomSlugSpider(scrapy.Spider):
         return item
 
     def _parse_search_data(self, response) -> dict | None:
-        next_data_raw = response.css("script#__NEXT_DATA__::text").get()
-        if not next_data_raw:
+        data = _parse_next_data(response)
+        if data is None:
             self._log.warning("No __NEXT_DATA__ found", url=response.url)
-            return None
-        try:
-            data = json.loads(next_data_raw)
-        except json.JSONDecodeError:
-            self._log.error("JSON decode failed", url=response.url)
             return None
         return (
             data.get("props", {})
@@ -507,7 +525,7 @@ class OtodomSlugSpider(scrapy.Spider):
 
     def closed(self, reason):
         self._ended_at = datetime.now(timezone.utc)
-        if hasattr(self, "run_dir") and self.run_dir and self._started_at:
+        if self._started_at is not None:
             try:
                 self.run_dir.mkdir(parents=True, exist_ok=True)
                 slug_run_meta_file = self.run_dir / "slug_run_meta.jsonl"
@@ -543,7 +561,7 @@ class OtodomSlugSpider(scrapy.Spider):
 class OtodomDetailSpider(scrapy.Spider):
     """Visits individual Otodom advert pages and yields RawListingItem.
 
-    Three invocation modes, selected automatically by priority:
+    Four invocation modes, selected automatically by priority:
 
     1. **Single-slug mode**: ``-a slug=some-slug``.
     2. **Inline mode**: ``-a slugs=slug1,slug2,...`` or ``-a slugs_file=/path/to/slugs.txt``
@@ -613,8 +631,8 @@ class OtodomDetailSpider(scrapy.Spider):
         else:
             self._slugs_list = [s.strip() for s in slugs.split(",") if s.strip()]
         self.run_timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        self._start_time = None
-        self._end_time = None
+        self._started_at = None
+        self._ended_at = None
         self._run_dir = None
         self._detail_scraped = 0
         self._detail_total = 0
@@ -624,11 +642,11 @@ class OtodomDetailSpider(scrapy.Spider):
     def run_dir(self) -> Path:
         if self._run_dir is None:
             data_dir = Path(self.settings.get("DATA_DIR"))
-            self._run_dir = data_dir / "otodom" / self.run_timestamp
+            self._run_dir = data_dir / "otodom" / f"{self.run_timestamp}_detail"
         return self._run_dir
 
     async def start(self):
-        self._start_time = datetime.now(timezone.utc)
+        self._started_at = datetime.now(timezone.utc)
 
         if self.single_slug:
             self._log.info("Single-slug mode", slug=self.single_slug)
@@ -697,12 +715,8 @@ class OtodomDetailSpider(scrapy.Spider):
         yield self._build_raw_item(ad, item)
 
     def _extract_ad(self, response) -> dict | None:
-        next_data_raw = response.css("script#__NEXT_DATA__::text").get()
-        if not next_data_raw:
-            return None
-        try:
-            data = json.loads(next_data_raw)
-        except json.JSONDecodeError:
+        data = _parse_next_data(response)
+        if data is None:
             return None
         ad = data.get("props", {}).get("pageProps", {}).get("ad")
         if not ad:
@@ -783,6 +797,8 @@ class OtodomDetailSpider(scrapy.Spider):
         loader.add_value("http_status", response.status)
 
         item = loader.load_item()
+        # ItemLoader wraps list-type values in an outer list when using TakeFirst;
+        # reassign directly to get the plain list.
         item["photo_urls"] = photo_urls
         for field_name in item.fields:
             if field_name not in item:
@@ -849,15 +865,15 @@ class OtodomDetailSpider(scrapy.Spider):
             return None
 
     def closed(self, reason):
-        self._end_time = datetime.now(timezone.utc)
-        if hasattr(self, "run_dir") and self.run_dir and self._start_time:
+        self._ended_at = datetime.now(timezone.utc)
+        if self._started_at is not None:
             try:
                 detail_runs_file = self.run_dir / "detail_runs.jsonl"
-                runtime_seconds = (self._end_time - self._start_time).total_seconds()
+                runtime_seconds = (self._ended_at - self._started_at).total_seconds()
                 completion_record = {
                     "run_id": self.run_timestamp,
-                    "start_time": self._start_time.isoformat(timespec="seconds"),
-                    "end_time": self._end_time.isoformat(timespec="seconds"),
+                    "start_time": self._started_at.isoformat(timespec="seconds"),
+                    "end_time": self._ended_at.isoformat(timespec="seconds"),
                     "runtime_seconds": runtime_seconds,
                     "runtime_human": f"{runtime_seconds:.1f}s",
                     "city": self.city,

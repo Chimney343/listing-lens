@@ -44,23 +44,45 @@ def _latest_run_dir() -> Path | None:
 
 
 def _read_slugs(run_dir: Path) -> list[str]:
-    """Extract slug list from slug_collection.jsonl in run_dir (for count reporting only)."""    
+    """
+    Extract slug list from slug_collection.jsonl in run_dir (for count reporting only).
+    
+    Args:
+        run_dir: Directory containing slug_collection.jsonl
+        
+    Returns:
+        List of slugs found
+        
+    Raises:
+        FileNotFoundError: If slug_collection.jsonl doesn't exist
+        ValueError: If no slugs found in file
+        json.JSONDecodeError: If file contains invalid JSON
+    """
     output_file = run_dir / "slug_collection.jsonl"
     if not output_file.exists():
-        print(f"[chain] ERROR: {output_file} not found", file=sys.stderr)
-        return []
+        raise FileNotFoundError(f"Slug collection file not found: {output_file}")
+    
     slugs: list[str] = []
     with open(output_file, encoding="utf-8") as f:
-        for line in f:
+        for line_num, line in enumerate(f, start=1):
             line = line.strip()
             if not line:
                 continue
-            record = json.loads(line)
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as e:
+                raise json.JSONDecodeError(
+                    f"Invalid JSON at line {line_num} in {output_file}",
+                    e.doc, e.pos
+                ) from e
+            
             slug = record.get("slug")
             if slug:
                 slugs.append(slug)
+    
     if not slugs:
-        print(f"[chain] ERROR: no slug records found in {output_file}", file=sys.stderr)
+        raise ValueError(f"No slug records found in {output_file}")
+    
     return slugs
 
 
@@ -101,10 +123,11 @@ def main() -> None:
         print("[chain] ERROR: no run directories found under data/otodom/", file=sys.stderr)
         sys.exit(1)
 
-    slugs = _read_slugs(run_dir)
-    if not slugs:
-        print("[chain] No slugs collected — nothing to detail-scrape.")
-        sys.exit(0)
+    try:
+        slugs = _read_slugs(run_dir)
+    except (FileNotFoundError, ValueError, json.JSONDecodeError) as e:
+        print(f"[chain] ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
 
     print(f"[chain] Collected {len(slugs)} slugs from {run_dir.name}")
 
