@@ -1,9 +1,4 @@
-sudo systemctl stop postgresql
-sudo mkdir -p /mnt/nvme/postgresql/15/main
-sudo chown -R postgres:postgres /mnt/nvme/postgresql
-sudo rsync -a /var/lib/postgresql/15/main/ /mnt/nvme/postgresql/15/main/
-sudo systemctl start postgresql
-sudo -u postgres psql -c "SHOW data_directory;""""Tests for the PostgreSQL-backed Scrapy pipeline."""
+"""Tests for the PostgreSQL-backed Scrapy pipeline."""
 
 from __future__ import annotations
 
@@ -13,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 from scrapy.exceptions import DropItem, NotConfigured
 
-from property_scraper import storage
+from storage import db as storage
 from property_scraper.items import RawListingItem
 from property_scraper.pipelines import DatabasePipeline
 

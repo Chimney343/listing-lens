@@ -63,9 +63,15 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
+# ─── DOWNLOADER MIDDLEWARES ──────────────────────────────────
 DOWNLOADER_MIDDLEWARES = {
     "scrapy_impersonate.RandomBrowserMiddleware": 500,
     "scrapy.downloadermiddlewares.useragent.UserAgentMiddleware": None,
+    # NOTE: Scrapy's RetryMiddleware is disabled because scrapy-playwright has
+    # its own built-in retry mechanism that handles browser-specific failures
+    # more gracefully (e.g., navigation timeouts, page crashes).
+    # The RETRY_* settings below are kept for documentation purposes but are
+    # not actively used by the disabled middleware.
     "scrapy.downloadermiddlewares.retry.RetryMiddleware": None,
 }
 
@@ -96,9 +102,13 @@ COOKIES_DEBUG = False
 # HTTPCACHE_STORAGE = "scrapy.extensions.httpcache.FilesystemCacheStorage"
 
 # ─── RETRY ───────────────────────────────────────────────────
-RETRY_ENABLED = True
-RETRY_TIMES = 3
-RETRY_HTTP_CODES = [403, 429, 500, 502, 503, 504]
+# NOTE: These settings are NOT ACTIVE because RetryMiddleware is disabled above.
+# Retry behavior is handled by scrapy-playwright's built-in mechanisms.
+# These settings are kept for reference and in case we need to re-enable
+# Scrapy's retry middleware in the future.
+RETRY_ENABLED = True  # Not used (middleware disabled)
+RETRY_TIMES = 3       # Not used (middleware disabled)
+RETRY_HTTP_CODES = [403, 429, 500, 502, 503, 504]  # Not used (middleware disabled)
 
 # ─── HEADERS ─────────────────────────────────────────────────
 DEFAULT_REQUEST_HEADERS = {
@@ -134,7 +144,7 @@ _logging.getLogger("playwright").setLevel(_logging.WARNING)
 LOG_DIR = Path(__file__).resolve().parents[2] / "logs"
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Configure structured logging if available
 try:
     from logging_config import configure_logging
     configure_logging(
@@ -144,7 +154,19 @@ try:
         enable_file_logging=True,
     )
 except ImportError:
-    pass  # Fall back to Scrapy's default logging
+    # Expected when logging_config.py is not available
+    import logging
+    logging.getLogger(__name__).info(
+        "logging_config module not found, using Scrapy's default logging"
+    )
+except Exception as e:
+    # Unexpected error - should be visible
+    import logging
+    logging.getLogger(__name__).error(
+        f"Failed to configure structured logging: {e}",
+        exc_info=True
+    )
+    # Fall back to Scrapy's default logging
 
 # ─── FEED EXPORT ─────────────────────────────────────────────
 FEED_EXPORT_ENCODING = "utf-8"

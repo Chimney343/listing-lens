@@ -9,12 +9,21 @@ from scrapy import Spider
 from scrapy.exceptions import DropItem, NotConfigured
 
 from property_scraper.items import RawListingItem
-from property_scraper import storage
+from storage import db as storage
 
 logger = structlog.get_logger(__name__)
 
 
 class ValidationPipeline:
+    """Validates items and writes rejections to a file.
+    
+    Note: File is kept open during spider execution for performance.
+    Resources are guaranteed to be cleaned up via close_spider() and __del__().
+    """
+    
+    def __init__(self) -> None:
+        self._reject_file = None
+    
     def open_spider(self, spider: Spider) -> None:
         # Use spider's run_dir if available, otherwise fallback to current directory
         if hasattr(spider, 'run_dir'):
@@ -26,7 +35,22 @@ class ValidationPipeline:
             self._reject_file = open(f"rejected_{spider.name}.jsonl", "a", encoding="utf-8")
 
     def close_spider(self, spider: Spider) -> None:
-        self._reject_file.close()
+        """Close reject file safely."""
+        if self._reject_file is not None:
+            try:
+                self._reject_file.close()
+            except Exception as e:
+                logger.warning("Error closing reject file", error=str(e))
+            finally:
+                self._reject_file = None
+    
+    def __del__(self) -> None:
+        """Safety net: ensure file is closed even if close_spider() is not called."""
+        if self._reject_file is not None:
+            try:
+                self._reject_file.close()
+            except Exception:
+                pass  # Don't raise in __del__
 
     def process_item(
         self, item: Any, spider: Optional[Spider] = None
@@ -42,9 +66,14 @@ class ValidationPipeline:
             reason = "no_price_or_area"
 
         if reason:
-            self._reject_file.write(
-                json.dumps({**dict(item), "_drop_reason": reason}, ensure_ascii=False) + "\n"
-            )
+            if self._reject_file is not None:
+                try:
+                    self._reject_file.write(
+                        json.dumps({**dict(item), "_drop_reason": reason}, ensure_ascii=False) + "\n"
+                    )
+                    self._reject_file.flush()  # Ensure data is written
+                except Exception as e:
+                    logger.error("Failed to write rejection record", error=str(e))
             raise scrapy.exceptions.DropItem(reason)
         return item
 
@@ -64,7 +93,12 @@ class PhotoDownloadPipeline:
 
 
 class DatabasePipeline:
-    """Persist validated listings and price observations in PostgreSQL."""
+    """Persist validated listings and price observations in PostgreSQL.
+    
+    Note: Database connection and reject file are kept open during spider
+    execution for performance. Resources are guaranteed to be cleaned up
+    via close_spider() and __del__().
+    """
 
     def __init__(self, database_url: str | None = None) -> None:
         self.database_url = database_url
@@ -88,13 +122,36 @@ class DatabasePipeline:
             logger.debug("DatabasePipeline writing to reject file", path=str(reject_path))
 
     def close_spider(self, spider: Spider) -> None:
+        """Close database connection and reject file safely."""
         if self._reject_file is not None:
-            self._reject_file.close()
-            self._reject_file = None
+            try:
+                self._reject_file.close()
+            except Exception as e:
+                logger.warning("Error closing reject file", error=str(e))
+            finally:
+                self._reject_file = None
 
         if self.connection is not None:
-            self.connection.close()
-            self.connection = None
+            try:
+                self.connection.close()
+            except Exception as e:
+                logger.warning("Error closing database connection", error=str(e))
+            finally:
+                self.connection = None
+    
+    def __del__(self) -> None:
+        """Safety net: ensure resources are closed even if close_spider() is not called."""
+        if self._reject_file is not None:
+            try:
+                self._reject_file.close()
+            except Exception:
+                pass  # Don't raise in __del__
+        
+        if self.connection is not None:
+            try:
+                self.connection.close()
+            except Exception:
+                pass  # Don't raise in __del__
 
     def _write_rejection(self, item: RawListingItem, error: Exception) -> None:
         if self._reject_file is None:
