@@ -177,6 +177,31 @@ Spiders check for these markers and skip yielding an item when detected. This pr
 | `CrawlerProcess.start()` calls `reactor.run()` only once, making it difficult to run multiple spiders sequentially inside a scheduler. | Spiders are launched via `subprocess.run()` from APScheduler jobs to avoid Twisted reactor conflicts. Never call `CrawlerProcess` or `CrawlerRunner` inside a scheduler job. |
 | Investment‑unit API interception fails because Otodom changes the fetch‑interception pattern. | The HTML fallback will still extract a subset of unit slugs (those linked directly on the page). |
 
+## Slug Lifecycle
+
+| Stage | Owner | What happens |
+|---|---|---|
+| Discovery | `OtodomSlugSpider._make_slug_item` | Yields `SlugCollectionItem` (UUID, `run_id`, `observed_at`). In-memory `self._slugs` set deduplicates within the run. |
+| Raw log insert | `DatabasePipeline._process_slug_item` | Inserts one row into `raw_slugs` per observation. No UNIQUE constraint — the same slug across two runs = two rows. Insert errors are warnings, not fatal. |
+| Queue refresh | `storage.db.refresh_slug_queue(conn)` | Idempotent `INSERT … ON CONFLICT` that aggregates `raw_slugs` → `slugs` (one row per `full_url`). Re-queues `'scraped'` slugs to `'pending'` when `last_seen_at > last_scraped_at`. Called by the coordinator, never by the spider. |
+| Detail scrape | `OtodomDetailSpider` (DB mode, TODO) | Queries `slugs WHERE scrape_status = 'pending'`, scrapes, yields `RawListingItem`, marks slug `'scraped'`. |
+
+```
+OtodomSlugSpider → raw_slugs (append-only log)
+                       ↓  refresh_slug_queue()  [separate call]
+                   slugs (operational queue, scrape_status)
+                       ↓
+               OtodomDetailSpider
+```
+
+---
+
+## Listing Lifecycle
+
+TODO
+
+---
+
 ## Testing Approach
 
 - **Unit tests** – for `area_config` URL builders, `items` field definitions, and pipeline validation logic.
