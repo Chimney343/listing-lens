@@ -33,14 +33,39 @@ def _run_spider(spider_name: str, args: list[str]) -> int:
 
 
 def _latest_run_dir() -> Path | None:
-    """Return the most recently created otodom run directory (YYYYMMDD_HHMMSS)."""
-    _DATE_DIR = re.compile(r"^\d{8}_\d{6}$")
+    """Return the most recent slug-collection run directory."""
+    _DATE_DIR = re.compile(r"^\d{8}_\d{6}(?:_slugs)?$")
     dirs = sorted(
-        (d for d in DATA_DIR.iterdir() if d.is_dir() and _DATE_DIR.match(d.name)),
+        (
+            d
+            for d in DATA_DIR.iterdir()
+            if d.is_dir()
+            and _DATE_DIR.match(d.name)
+            and (d / "slug_collection.jsonl").exists()
+        ),
         key=lambda d: d.name,
         reverse=True,
     )
     return dirs[0] if dirs else None
+
+
+def _read_run_city(run_dir: Path) -> str | None:
+    """Read the city recorded by the slug spider, if available."""
+    meta_file = run_dir / "slug_run_meta.jsonl"
+    if not meta_file.exists():
+        return None
+
+    with open(meta_file, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            record = json.loads(line)
+            city = record.get("city")
+            if city:
+                return str(city)
+
+    return None
 
 
 def _read_slugs(run_dir: Path) -> list[str]:
@@ -135,8 +160,9 @@ def main() -> None:
     # Pass the slug_collection.jsonl path directly — OtodomDetailSpider reads SlugCollectionItem records.
     slug_collection_file = str(run_dir / "slug_collection.jsonl")
     detail_args = ["-a", f"slug_collection_file={slug_collection_file}"]
-    if opts.city:
-        detail_args += ["-a", f"city={opts.city}"]
+    detail_city = opts.city or _read_run_city(run_dir)
+    if detail_city:
+        detail_args += ["-a", f"city={detail_city}"]
 
     print(f"[chain] Running otodom_detail for {len(slugs)} slugs …")
     rc = _run_spider("otodom_detail", detail_args)
