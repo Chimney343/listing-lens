@@ -70,6 +70,7 @@ instance/
 
 # Runtime data
 data/
+logs/
 scrapy_project/rejected_otodom.jsonl
 
 # Sphinx documentation

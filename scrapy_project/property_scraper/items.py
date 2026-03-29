@@ -31,13 +31,14 @@ class SlugRunMetaItem(scrapy.Item):
 
 
 class SlugCollectionItem(scrapy.Item):
-    """Spider-populated fields for a new slug row, yielded once per discovered slug."""
+    """Spider-populated fields for a raw_slugs row, yielded once per discovered slug."""
 
-    id = Field()        # UUID assigned at collection time
+    id = Field()          # UUID assigned at collection time
     run_id = Field()
     portal = Field()
     slug = Field()
     full_url = Field()
+    observed_at = Field()  # ISO-8601 UTC timestamp of this observation
 
 
 class RawListingItem(scrapy.Item):

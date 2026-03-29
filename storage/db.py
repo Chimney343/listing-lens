@@ -12,89 +12,49 @@ except ImportError:  # pragma: no cover - exercised only when dependency is miss
     psycopg = None  # type: ignore[assignment]
 
 
-LISTING_COLUMNS = (
+RAW_LISTING_COLUMNS = (
     "source_portal",
     "source_url",
     "external_id",
     "title",
     "description",
+    "description_length",
     "city",
     "district",
     "street",
     "latitude",
     "longitude",
+    "price_pln",
+    "price_per_m2",
     "area_m2",
     "rooms",
     "floor",
     "total_floors",
     "year_built",
-    "property_type",
-    "market_type",
-    "listing_type",
-    "heating_type",
-    "building_material",
     "has_lift",
     "has_balcony",
     "has_terrace",
-    "has_parking",
     "has_storage",
+    "has_floor_plan",
+    "heating_type",
+    "parking",
+    "has_parking",
+    "building_material",
+    "property_type",
+    "market_type",
+    "listing_type",
+    "date_posted",
+    "photo_urls",
     "photo_count",
     "photo_paths",
-    "composite_score",
-    "status",
-    "last_scraped_at",
-    "last_scored_at",
+    "http_status",
+    "scraped_at",
 )
 
-LISTING_INSERT_SQL = f"""
-INSERT INTO listings ({", ".join(LISTING_COLUMNS)})
-VALUES ({", ".join(["%s"] * len(LISTING_COLUMNS))})
-ON CONFLICT (source_url) DO UPDATE SET
-    source_portal = EXCLUDED.source_portal,
-    external_id = EXCLUDED.external_id,
-    title = EXCLUDED.title,
-    description = EXCLUDED.description,
-    city = EXCLUDED.city,
-    district = EXCLUDED.district,
-    street = EXCLUDED.street,
-    latitude = EXCLUDED.latitude,
-    longitude = EXCLUDED.longitude,
-    area_m2 = EXCLUDED.area_m2,
-    rooms = EXCLUDED.rooms,
-    floor = EXCLUDED.floor,
-    total_floors = EXCLUDED.total_floors,
-    year_built = EXCLUDED.year_built,
-    property_type = EXCLUDED.property_type,
-    market_type = EXCLUDED.market_type,
-    listing_type = EXCLUDED.listing_type,
-    heating_type = EXCLUDED.heating_type,
-    building_material = EXCLUDED.building_material,
-    has_lift = EXCLUDED.has_lift,
-    has_balcony = EXCLUDED.has_balcony,
-    has_terrace = EXCLUDED.has_terrace,
-    has_parking = EXCLUDED.has_parking,
-    has_storage = EXCLUDED.has_storage,
-    photo_count = EXCLUDED.photo_count,
-    photo_paths = EXCLUDED.photo_paths,
-    composite_score = EXCLUDED.composite_score,
-    status = EXCLUDED.status,
-    last_scraped_at = EXCLUDED.last_scraped_at,
-    last_scored_at = EXCLUDED.last_scored_at,
-    updated_at = now()
+RAW_LISTING_INSERT_SQL = f"""
+INSERT INTO raw_listings ({", ".join(RAW_LISTING_COLUMNS)})
+VALUES ({", ".join(["%s"] * len(RAW_LISTING_COLUMNS))})
 RETURNING id
-""".strip()
-
-PRICE_LOOKUP_SQL = """
-SELECT price_pln
-FROM price_history
-WHERE listing_id = %s
-ORDER BY observed_at DESC
-LIMIT 1
-""".strip()
-
-PRICE_INSERT_SQL = """
-INSERT INTO price_history (listing_id, price_pln, price_per_m2, observed_at, source)
-VALUES (%s, %s, %s, %s, %s)
 """.strip()
 
 
@@ -118,6 +78,123 @@ def _normalize_text(value: Any, *, upper: bool = False) -> Any:
     return value.upper() if upper else value.lower()
 
 
+def _to_optional_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    return _to_datetime(value)
+
+
+# ── raw_slugs ──────────────────────────────────────────────────────────────
+
+RAW_SLUG_COLUMNS = (
+    "id",
+    "run_id",
+    "portal",
+    "slug",
+    "full_url",
+    "observed_at",
+)
+
+RAW_SLUG_INSERT_SQL = f"""
+INSERT INTO raw_slugs ({", ".join(RAW_SLUG_COLUMNS)})
+VALUES ({", ".join(["%s"] * len(RAW_SLUG_COLUMNS))})
+ON CONFLICT DO NOTHING
+""".strip()
+
+
+def build_raw_slug_record(item: Mapping[str, Any]) -> dict[str, Any]:
+    """Map a SlugCollectionItem into the columns stored on raw_slugs."""
+    return {
+        "id": item.get("id"),
+        "run_id": item.get("run_id"),
+        "portal": item.get("portal"),
+        "slug": item.get("slug"),
+        "full_url": item.get("full_url"),
+        "observed_at": _to_datetime(item.get("observed_at")),
+    }
+
+
+# ── slug_runs ─────────────────────────────────────────────────────────────
+
+SLUG_RUN_COLUMNS = (
+    "run_id",
+    "portal",
+    "city",
+    "started_at",
+    "ended_at",
+    "runtime_seconds",
+    "completion_reason",
+    "parameters",
+    "total_advertised",
+    "investments_found",
+    "slug_count",
+)
+
+SLUG_RUN_INSERT_SQL = f"""
+INSERT INTO slug_runs ({", ".join(SLUG_RUN_COLUMNS)})
+VALUES ({", ".join(["%s"] * len(SLUG_RUN_COLUMNS))})
+ON CONFLICT (run_id) DO NOTHING
+""".strip()
+
+
+def build_slug_run_record(item: Mapping[str, Any]) -> dict[str, Any]:
+    """Map a SlugRunMetaItem into the columns stored on slug_runs."""
+    parameters = item.get("parameters") or {}
+    return {
+        "run_id": item.get("run_id"),
+        "portal": item.get("portal"),
+        "city": item.get("city") or "",
+        "started_at": _to_datetime(item.get("started_at")),
+        "ended_at": _to_optional_datetime(item.get("ended_at")),
+        "runtime_seconds": item.get("runtime_seconds"),
+        "completion_reason": item.get("completion_reason"),
+        "parameters": parameters,
+        "total_advertised": item.get("total_advertised"),
+        "investments_found": item.get("investments_found"),
+        "slug_count": item.get("slug_count") or 0,
+    }
+
+
+# ── slug queue refresh ────────────────────────────────────────────────────
+
+_REFRESH_SLUG_QUEUE_SQL = """
+INSERT INTO slugs (portal, slug, full_url, first_seen_at, last_seen_at, observation_count)
+SELECT
+    portal,
+    slug,
+    full_url,
+    MIN(observed_at) AS first_seen_at,
+    MAX(observed_at) AS last_seen_at,
+    COUNT(*)         AS observation_count
+FROM raw_slugs
+GROUP BY portal, slug, full_url
+ON CONFLICT (full_url) DO UPDATE SET
+    last_seen_at      = EXCLUDED.last_seen_at,
+    observation_count = EXCLUDED.observation_count,
+    scrape_status     = CASE
+        WHEN slugs.scrape_status = 'scraped'
+             AND slugs.last_scraped_at < EXCLUDED.last_seen_at
+        THEN 'pending'
+        ELSE slugs.scrape_status
+    END
+"""
+
+
+def refresh_slug_queue(conn) -> int:
+    """Upsert the operational ``slugs`` queue from the ``raw_slugs`` log.
+
+    Safe to call at any time and any frequency — fully idempotent.
+    Slugs previously marked ``'scraped'`` are re-queued as ``'pending'``
+    when a newer observation arrives after the last scrape.
+
+    Returns the number of rows inserted or updated.
+    """
+    with conn.transaction():
+        with conn.cursor() as cursor:
+            cursor.execute(_REFRESH_SLUG_QUEUE_SQL)
+            return cursor.rowcount
+
+
 def _to_datetime(value: Any) -> datetime:
     if isinstance(value, datetime):
         return value
@@ -136,9 +213,13 @@ def _to_text_list(value: Any) -> list[str]:
     return [str(value)]
 
 
-def build_listing_record(item: Mapping[str, Any]) -> dict[str, Any]:
-    """Map a RawListingItem into the columns stored on listings."""
+def build_raw_listing_record(item: Mapping[str, Any]) -> dict[str, Any]:
+    """Map a RawListingItem into the columns stored on raw_listings.
 
+    raw_listings is the append-only ingest table.  Every field from the spider
+    is stored verbatim — no deduplication, no price-change logic.  That work
+    belongs to ListingProcessor (Stage 2).
+    """
     parking_value = item.get("has_parking")
     if parking_value is None:
         parking_value = item.get("parking")
@@ -149,56 +230,35 @@ def build_listing_record(item: Mapping[str, Any]) -> dict[str, Any]:
         "external_id": item.get("external_id"),
         "title": item.get("title"),
         "description": item.get("description"),
+        "description_length": item.get("description_length"),
         "city": item.get("city"),
         "district": item.get("district"),
         "street": item.get("street"),
         "latitude": item.get("latitude"),
         "longitude": item.get("longitude"),
+        "price_pln": item.get("price_pln"),
+        "price_per_m2": item.get("price_per_m2"),
         "area_m2": item.get("area_m2"),
         "rooms": item.get("rooms"),
         "floor": item.get("floor"),
         "total_floors": item.get("total_floors"),
         "year_built": item.get("year_built"),
-        "property_type": _normalize_text(item.get("property_type")),
-        "market_type": _normalize_text(item.get("market_type"), upper=True),
-        "listing_type": _normalize_text(item.get("listing_type")),
-        "heating_type": item.get("heating_type"),
-        "building_material": item.get("building_material"),
         "has_lift": _optional_bool(item.get("has_lift")),
         "has_balcony": _optional_bool(item.get("has_balcony")),
         "has_terrace": _optional_bool(item.get("has_terrace")),
-        "has_parking": _optional_bool(parking_value),
         "has_storage": _optional_bool(item.get("has_storage")),
+        "has_floor_plan": _optional_bool(item.get("has_floor_plan")),
+        "heating_type": item.get("heating_type"),
+        "parking": item.get("parking"),
+        "has_parking": _optional_bool(parking_value),
+        "building_material": item.get("building_material"),
+        "property_type": _normalize_text(item.get("property_type")),
+        "market_type": _normalize_text(item.get("market_type"), upper=True),
+        "listing_type": _normalize_text(item.get("listing_type")),
+        "date_posted": item.get("date_posted"),
+        "photo_urls": _to_text_list(item.get("photo_urls")),
         "photo_count": item.get("photo_count") or 0,
         "photo_paths": _to_text_list(item.get("photo_paths")),
-        "composite_score": item.get("composite_score"),
-        "status": _normalize_text(item.get("status") or "active"),
-        "last_scraped_at": _to_datetime(item.get("date_scraped")),
-        "last_scored_at": item.get("last_scored_at"),
+        "http_status": item.get("http_status"),
+        "scraped_at": _to_datetime(item.get("date_scraped")),
     }
-
-
-def build_price_record(
-    listing_id: Any,
-    item: Mapping[str, Any],
-    observed_at: datetime,
-) -> dict[str, Any]:
-    """Build the append-only price_history row for a listing."""
-
-    return {
-        "listing_id": listing_id,
-        "price_pln": item.get("price_pln"),
-        "price_per_m2": item.get("price_per_m2"),
-        "observed_at": observed_at,
-        "source": "scrape",
-    }
-
-
-def has_price_changed(new_price: Any, previous_price: Any) -> bool:
-    """Return True when a listing needs a new price_history row."""
-
-    if new_price is None:
-        return False
-    if previous_price is None:
-        return True
-    return new_price != previous_price
