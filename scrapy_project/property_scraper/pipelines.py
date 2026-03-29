@@ -8,7 +8,7 @@ import scrapy
 from scrapy import Spider
 from scrapy.exceptions import DropItem, NotConfigured
 
-from property_scraper.items import RawListingItem
+from property_scraper.items import RawListingItem, SlugCollectionItem
 from storage import db as storage
 
 logger = structlog.get_logger(__name__)
@@ -77,6 +77,72 @@ class ValidationPipeline:
             raise scrapy.exceptions.DropItem(reason)
         return item
 
+
+
+class PiiFilterPipeline:
+    """Redacts PII from free-text fields before storage.
+
+    Targets: title, description only.
+    Structured address fields (street, city, district) are intentionally
+    preserved — they are part of the dedup hash and property identity.
+    """
+
+    _TEXT_FIELDS = ("title", "description")
+
+    def __init__(
+        self,
+        *,
+        entities: list[str],
+        language: str,
+        nlp_model: str,
+        score_threshold: float,
+        operators: dict,
+    ) -> None:
+        self._entities = entities
+        self._language = language
+        self._nlp_model = nlp_model
+        self._score_threshold = score_threshold
+        self._operators = operators
+
+    @classmethod
+    def from_crawler(cls, crawler: Any) -> "PiiFilterPipeline":
+        from property_scraper.pii_filter import DEFAULT_ENTITIES  # deferred: heavy import
+
+        if not crawler.settings.getbool("PII_ENABLED", True):
+            raise NotConfigured("PII filtering disabled via PII_ENABLED=False")
+
+        return cls(
+            entities=crawler.settings.getlist("PII_ENTITIES", list(DEFAULT_ENTITIES)),
+            language=crawler.settings.get("PII_LANGUAGE", "en"),
+            nlp_model=crawler.settings.get("PII_NLP_MODEL", "en_core_web_sm"),
+            score_threshold=crawler.settings.getfloat("PII_SCORE_THRESHOLD", 0.0),
+            operators=crawler.settings.getdict("PII_OPERATORS", {}),
+        )
+
+    def open_spider(self, spider: Spider) -> None:
+        from property_scraper.pii_filter import PiiFilter  # deferred: heavy import
+        self._filter = PiiFilter(
+            entities=self._entities,
+            language=self._language,
+            nlp_model=self._nlp_model,
+            score_threshold=self._score_threshold,
+            operators=self._operators,
+        )
+        logger.info("PiiFilterPipeline ready", spider=spider.name)
+
+    def process_item(
+        self, item: Any, spider: Optional[Spider] = None
+    ) -> Union[Any, scrapy.Item]:
+        if not isinstance(item, RawListingItem):
+            return item
+        for field in self._TEXT_FIELDS:
+            original = item.get(field)
+            if original:
+                cleaned = self._filter.clean(original)
+                if cleaned != original:
+                    logger.info("pii_redacted", field=field, spider=getattr(spider, "name", None))
+                    item[field] = cleaned
+        return item
 
 
 class PhotoDownloadPipeline:
@@ -177,49 +243,28 @@ class DatabasePipeline:
     def process_item(
         self, item: Any, spider: Optional[Spider] = None
     ) -> Union[Any, scrapy.Item]:
+        if isinstance(item, SlugCollectionItem):
+            return self._process_slug_item(item)
+
         if not isinstance(item, RawListingItem):
             return item
 
         if self.connection is None:
             raise NotConfigured("DatabasePipeline must be opened before processing items")
 
-        listing_record = storage.build_listing_record(item)
-        price_value = item.get("price_pln")
+        record = storage.build_raw_listing_record(item)
 
         try:
             with self.connection.transaction():
                 with self.connection.cursor() as cursor:
                     cursor.execute(
-                        storage.LISTING_INSERT_SQL,
-                        [listing_record[column] for column in storage.LISTING_COLUMNS],
+                        storage.RAW_LISTING_INSERT_SQL,
+                        [record[column] for column in storage.RAW_LISTING_COLUMNS],
                     )
-                    listing_id = cursor.fetchone()[0]
-
-                    if price_value is not None:
-                        cursor.execute(storage.PRICE_LOOKUP_SQL, (listing_id,))
-                        previous_row = cursor.fetchone()
-                        previous_price = previous_row[0] if previous_row else None
-
-                        if storage.has_price_changed(price_value, previous_price):
-                            price_record = storage.build_price_record(
-                                listing_id,
-                                item,
-                                listing_record["last_scraped_at"],
-                            )
-                            cursor.execute(
-                                storage.PRICE_INSERT_SQL,
-                                (
-                                    price_record["listing_id"],
-                                    price_record["price_pln"],
-                                    price_record["price_per_m2"],
-                                    price_record["observed_at"],
-                                    price_record["source"],
-                                ),
-                            )
         except Exception as error:
             if self._is_unique_violation(error):
                 logger.warning(
-                    "Database unique violation ignored",
+                    "raw_listings unique violation ignored",
                     source_url=item.get("source_url"),
                     error=str(error),
                 )
@@ -235,8 +280,29 @@ class DatabasePipeline:
             raise DropItem("db_error") from error
 
         logger.debug(
-            "DatabasePipeline stored listing",
+            "raw_listing stored",
             source_url=item.get("source_url"),
             source_portal=item.get("source_portal"),
         )
+        return item
+
+    def _process_slug_item(self, item: SlugCollectionItem) -> SlugCollectionItem:
+        """Insert a single raw_slug observation row."""
+        if self.connection is None:
+            return item
+
+        record = storage.build_raw_slug_record(item)
+        try:
+            with self.connection.transaction():
+                with self.connection.cursor() as cursor:
+                    cursor.execute(
+                        storage.RAW_SLUG_INSERT_SQL,
+                        [record[col] for col in storage.RAW_SLUG_COLUMNS],
+                    )
+        except Exception as error:
+            logger.warning(
+                "raw_slug insert failed",
+                slug=item.get("slug"),
+                error=str(error),
+            )
         return item

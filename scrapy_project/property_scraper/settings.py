@@ -174,6 +174,42 @@ FEED_EXPORT_ENCODING = "utf-8"
 # ─── PIPELINES ───────────────────────────────────────────────
 ITEM_PIPELINES = {
     "property_scraper.pipelines.ValidationPipeline": 100,
+    "property_scraper.pipelines.PiiFilterPipeline": 200,
     "property_scraper.pipelines.PhotoDownloadPipeline": 300,
     # "property_scraper.pipelines.DatabasePipeline": 400,
 }
+
+# ─── PII FILTER ──────────────────────────────────────────────
+# Set PII_ENABLED = False to bypass redaction entirely (e.g. in development).
+PII_ENABLED = True
+# Entity types forwarded to Presidio. Add "PERSON" here once a Polish spaCy
+# model is available (see Stage B note in pii_filter.py).
+PII_ENTITIES = ["PHONE_NUMBER", "EMAIL_ADDRESS", "URL", "PL_PESEL"]
+# spaCy model used for tokenisation. Must be installed in the virtualenv.
+# Use "pl_core_news_md" when enabling Polish NER (PII_ENTITIES += ["PERSON"]).
+PII_NLP_MODEL = "en_core_web_sm"
+# Language tag passed to Presidio Analyzer. Must match the NLP model family.
+PII_LANGUAGE = "en"
+# Minimum confidence score [0.0–1.0] below which a detection is ignored.
+# Raise to e.g. 0.7 to suppress low-confidence hits.
+PII_SCORE_THRESHOLD = 0.0
+# Per-entity anonymization operators.  Keys are entity type strings (or the
+# special key "DEFAULT" which applies to any entity without an explicit entry).
+# Each value is a dict with a required "type" key (Presidio operator name) and
+# optional operator-specific parameters.
+#
+# Supported operator types and their parameters:
+#   replace   new_value (str)  — replace span with a fixed string
+#   redact    —                — delete the span entirely
+#   mask      masking_char (str), chars_to_mask (int), from_end (bool)
+#   hash      hash_type ("sha256"|"sha512"|"md5")
+#   encrypt   key (str, 128/192/256-bit base64)
+#   keep      —                — leave span as-is (useful as DEFAULT)
+#
+# Examples:
+#   PII_OPERATORS = {
+#       "PHONE_NUMBER": {"type": "replace", "new_value": "<TELEFON>"},
+#       "EMAIL_ADDRESS": {"type": "redact"},
+#       "DEFAULT":       {"type": "replace", "new_value": "<PII>"},
+#   }
+PII_OPERATORS: dict = {}

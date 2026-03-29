@@ -9,7 +9,7 @@ import pytest
 from scrapy.exceptions import DropItem, NotConfigured
 
 from storage import db as storage
-from property_scraper.items import RawListingItem
+from property_scraper.items import RawListingItem, SlugCollectionItem
 from property_scraper.pipelines import DatabasePipeline
 
 
@@ -17,6 +17,7 @@ class FakeCursor:
     def __init__(self, fetchone_results):
         self.fetchone_results = list(fetchone_results)
         self.executed = []
+        self.rowcount = 0
 
     def __enter__(self):
         return self
@@ -74,6 +75,7 @@ def _build_item(**overrides):
             "external_id": "123",
             "title": "Przykładowe mieszkanie",
             "description": "Opis",
+            "description_length": 4,
             "city": "Krakow",
             "district": "Centrum",
             "street": "Florianska",
@@ -92,10 +94,12 @@ def _build_item(**overrides):
             "has_lift": True,
             "has_balcony": True,
             "has_terrace": False,
+            "has_floor_plan": True,
             "parking": "garage",
             "has_storage": False,
             "photo_count": 2,
             "photo_paths": ["otodom/123/photo-1.jpg"],
+            "date_posted": "2026-01-15T10:30:00+00:00",
             "date_scraped": "2026-03-25T10:00:00+00:00",
             "price_pln": 850000,
             "price_per_m2": 12500,
@@ -112,8 +116,8 @@ def test_open_spider_requires_database_url():
         pipeline.open_spider(SimpleNamespace(name="otodom"))
 
 
-def test_process_item_stores_listing_and_price_history():
-    connection = FakeConnection(fetchone_results=[("listing-uuid",), None])
+def test_process_item_stores_raw_listing():
+    connection = FakeConnection(fetchone_results=[("raw-listing-uuid",)])
     pipeline = DatabasePipeline(database_url="postgresql://example/test")
     pipeline.connection = connection
 
@@ -123,32 +127,21 @@ def test_process_item_stores_listing_and_price_history():
     assert result is item
     assert connection.transaction_count == 1
     assert connection.transaction_exits == [None]
+    assert len(connection.cursor_obj.executed) == 1
 
-    listing_sql, listing_params = connection.cursor_obj.executed[0]
-    assert listing_sql == storage.LISTING_INSERT_SQL
-    assert listing_params[storage.LISTING_COLUMNS.index("source_portal")] == "otodom"
-    assert listing_params[storage.LISTING_COLUMNS.index("has_parking")] is True
-    assert listing_params[storage.LISTING_COLUMNS.index("photo_paths")] == [
+    raw_sql, raw_params = connection.cursor_obj.executed[0]
+    assert raw_sql == storage.RAW_LISTING_INSERT_SQL
+    assert raw_params[storage.RAW_LISTING_COLUMNS.index("source_portal")] == "otodom"
+    assert raw_params[storage.RAW_LISTING_COLUMNS.index("has_parking")] is True
+    assert raw_params[storage.RAW_LISTING_COLUMNS.index("parking")] == "garage"
+    assert raw_params[storage.RAW_LISTING_COLUMNS.index("description_length")] == 4
+    assert raw_params[storage.RAW_LISTING_COLUMNS.index("has_floor_plan")] is True
+    assert raw_params[storage.RAW_LISTING_COLUMNS.index("date_posted")] == "2026-01-15T10:30:00+00:00"
+    assert raw_params[storage.RAW_LISTING_COLUMNS.index("photo_paths")] == [
         "otodom/123/photo-1.jpg"
     ]
-
-    price_sql, price_params = connection.cursor_obj.executed[1]
-    assert price_sql == storage.PRICE_LOOKUP_SQL
-    insert_sql, insert_params = connection.cursor_obj.executed[2]
-    assert insert_sql == storage.PRICE_INSERT_SQL
-    assert insert_params[1] == 850000
-    assert insert_params[2] == 12500
-
-
-def test_process_item_skips_price_history_when_price_is_unchanged():
-    connection = FakeConnection(fetchone_results=[("listing-uuid",), (850000,)])
-    pipeline = DatabasePipeline(database_url="postgresql://example/test")
-    pipeline.connection = connection
-
-    pipeline.process_item(_build_item(), spider=SimpleNamespace(name="otodom"))
-
-    executed_sql = [sql for sql, _ in connection.cursor_obj.executed]
-    assert executed_sql == [storage.LISTING_INSERT_SQL, storage.PRICE_LOOKUP_SQL]
+    assert raw_params[storage.RAW_LISTING_COLUMNS.index("price_pln")] == 850000
+    assert raw_params[storage.RAW_LISTING_COLUMNS.index("price_per_m2")] == 12500
 
 
 def test_process_item_ignores_unique_violation():
@@ -188,3 +181,125 @@ def test_process_item_writes_rejection_file_on_db_error(tmp_path):
     payload = json.loads(contents)
     assert payload["_drop_reason"] == "db_error"
     assert payload["_drop_error"] == "database is down"
+
+
+# ── SlugCollectionItem handling ───────────────────────────────────────────
+
+
+def _build_slug_item(**overrides):
+    item = SlugCollectionItem()
+    item.update(
+        {
+            "id": "aaaaaaaa-0000-0000-0000-000000000001",
+            "run_id": "run-abc",
+            "portal": "otodom",
+            "slug": "mieszkanie-krakow-test-12345",
+            "full_url": "https://www.otodom.pl/pl/oferta/mieszkanie-krakow-test-12345",
+            "observed_at": "2026-03-29T10:00:00+00:00",
+        }
+    )
+    item.update(overrides)
+    return item
+
+
+def test_process_slug_item_inserts_raw_slug():
+    connection = FakeConnection(fetchone_results=[])
+    pipeline = DatabasePipeline(database_url="postgresql://example/test")
+    pipeline.connection = connection
+
+    item = _build_slug_item()
+    result = pipeline.process_item(item)
+
+    assert result is item
+    assert connection.transaction_count == 1
+    assert len(connection.cursor_obj.executed) == 1
+
+    sql, params = connection.cursor_obj.executed[0]
+    assert sql == storage.RAW_SLUG_INSERT_SQL
+    assert params[storage.RAW_SLUG_COLUMNS.index("slug")] == "mieszkanie-krakow-test-12345"
+    assert params[storage.RAW_SLUG_COLUMNS.index("portal")] == "otodom"
+    assert params[storage.RAW_SLUG_COLUMNS.index("run_id")] == "run-abc"
+
+
+def test_process_slug_item_passes_through_without_connection():
+    """Pipeline silently passes slug items when no DB connection is open."""
+    pipeline = DatabasePipeline(database_url="postgresql://example/test")
+    # connection deliberately not set (simulates no DATABASE_URL path)
+
+    item = _build_slug_item()
+    result = pipeline.process_item(item)
+
+    assert result is item
+
+
+def test_process_slug_item_logs_warning_on_error():
+    """A DB error on slug insertion is logged as a warning, not re-raised."""
+    connection = FakeConnection(fetchone_results=[])
+
+    def raise_error(*args, **kwargs):
+        raise RuntimeError("constraint violation")
+
+    connection.cursor_obj.execute = raise_error
+
+    pipeline = DatabasePipeline(database_url="postgresql://example/test")
+    pipeline.connection = connection
+
+    # Should not raise — slug errors are non-fatal
+    result = pipeline.process_item(_build_slug_item())
+    assert isinstance(result, SlugCollectionItem)
+
+
+# ── storage.db helpers ────────────────────────────────────────────────────
+
+
+def test_build_raw_slug_record_maps_fields():
+    item = _build_slug_item()
+    record = storage.build_raw_slug_record(item)
+
+    assert record["slug"] == "mieszkanie-krakow-test-12345"
+    assert record["portal"] == "otodom"
+    assert record["run_id"] == "run-abc"
+    assert record["full_url"] == "https://www.otodom.pl/pl/oferta/mieszkanie-krakow-test-12345"
+    # observed_at should be a datetime object
+    from datetime import datetime
+    assert isinstance(record["observed_at"], datetime)
+
+
+def test_build_slug_run_record_maps_fields():
+    from property_scraper.items import SlugRunMetaItem
+
+    item = SlugRunMetaItem()
+    item.update(
+        {
+            "run_id": "run-xyz",
+            "portal": "otodom",
+            "city": "krakow",
+            "started_at": "2026-03-29T09:00:00+00:00",
+            "ended_at": "2026-03-29T09:05:00+00:00",
+            "runtime_seconds": 300.0,
+            "completion_reason": "finished",
+            "parameters": {"city": "krakow", "max_pages": "5"},
+            "total_advertised": 200,
+            "investments_found": 3,
+            "slug_count": 195,
+        }
+    )
+    record = storage.build_slug_run_record(item)
+
+    assert record["run_id"] == "run-xyz"
+    assert record["city"] == "krakow"
+    assert record["slug_count"] == 195
+    assert record["investments_found"] == 3
+    assert record["parameters"] == {"city": "krakow", "max_pages": "5"}
+
+
+def test_refresh_slug_queue_executes_upsert():
+    connection = FakeConnection(fetchone_results=[])
+    storage.refresh_slug_queue(connection)
+
+    assert connection.transaction_count == 1
+    assert len(connection.cursor_obj.executed) == 1
+    sql, params = connection.cursor_obj.executed[0]
+    assert "INSERT INTO slugs" in sql
+    assert "ON CONFLICT" in sql
+    assert params is None  # no bind params — pure SQL

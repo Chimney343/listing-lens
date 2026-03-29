@@ -371,6 +371,31 @@ class TestSpiderInitialization:
         spider = OtodomDetailSpider(slug_collection_file=str(collection_file))
         assert spider._slugs_list == ["run-slug-1", "run-slug-2", "run-slug-3"]
 
+    def test_detail_spider_slug_collection_file_infers_city_from_run_meta(self, tmp_path):
+        """Detail spider should infer city from sibling slug_run_meta.jsonl when unset."""
+        collection_file = tmp_path / "slug_collection.jsonl"
+        collection_file.write_text(
+            json.dumps(
+                {
+                    "id": "uuid-1",
+                    "run_id": "r1",
+                    "portal": "otodom",
+                    "slug": "run-slug-1",
+                    "full_url": "https://www.otodom.pl/pl/oferta/run-slug-1",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "slug_run_meta.jsonl").write_text(
+            json.dumps({"city": "krakow"}) + "\n",
+            encoding="utf-8",
+        )
+
+        spider = OtodomDetailSpider(slug_collection_file=str(collection_file))
+
+        assert spider.city == "krakow"
+
     def test_detail_spider_slug_collection_file_empty(self, tmp_path):
         """Detail spider raises if no slug records are found in the collection file."""
         import json
@@ -564,6 +589,39 @@ class TestParseDetailMethod:
         assert raw_item["raw_json"] == sample_detail_json["props"]["pageProps"]["ad"]
         assert raw_item["external_id"] == "12345"
         assert raw_item["source_url"] == "https://www.otodom.pl/pl/oferta/test-slug"
+
+    def test_parse_detail_uses_city_from_slug_run_meta_when_constructor_city_is_unset(
+        self, tmp_path, sample_detail_json
+    ):
+        collection_file = tmp_path / "slug_collection.jsonl"
+        collection_file.write_text(
+            json.dumps(
+                {
+                    "id": "uuid-1",
+                    "run_id": "r1",
+                    "portal": "otodom",
+                    "slug": "test-slug",
+                    "full_url": "https://www.otodom.pl/pl/oferta/test-slug",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "slug_run_meta.jsonl").write_text(
+            json.dumps({"city": "krakow"}) + "\n",
+            encoding="utf-8",
+        )
+        spider = OtodomDetailSpider(slug_collection_file=str(collection_file))
+        html = f'<script id="__NEXT_DATA__">{json.dumps(sample_detail_json)}</script>'
+        response = TextResponse(
+            url="https://www.otodom.pl/pl/oferta/test-slug",
+            body=html.encode("utf-8"),
+            encoding="utf-8",
+        )
+
+        items = list(spider.parse_detail(response))
+
+        assert items[0]["city"] == "Krakow"
 
     def test_parse_detail_no_script(self, detail_spider):
         html = "<html><body>No script</body></html>"
