@@ -1,0 +1,31 @@
+# Developer preset for Otodom slug/detail local runs.
+#
+# This profile is intentionally conservative and local-friendly:
+# - DB slug queue disabled by default (file handoff mode)
+# - bounded max_pages for predictable runtime
+# - values can be overridden via scrapy -a args or chain_otodom.py flags
+
+city: mielec
+voivodeship: podkarpackie
+powiat: mielecki
+gmina: gmina-miejska--mielec
+property_type: mieszkanie
+
+districts: []
+price_min: 
+price_max: 
+area_min: 
+area_max: 
+terrain_area_min: 
+terrain_area_max: 
+price_per_meter_min: 
+price_per_meter_max: 
+build_year_min: 
+build_year_max: 
+rooms_number: []
+building_material: []
+extras: []
+max_pages: 
+
+phase1_only: "0"
+use_db_slug_queue: "0"

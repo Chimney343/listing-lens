@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from scrapy.exceptions import DropItem, NotConfigured
@@ -66,6 +67,31 @@ class FakeConnection:
         self.closed = True
 
 
+class FakeSettings:
+    def __init__(self, *, use_db_slug_queue: bool, database_url: str | None) -> None:
+        self._use_db_slug_queue = use_db_slug_queue
+        self._database_url = database_url
+
+    def getbool(self, key: str, default: bool = False) -> bool:
+        if key == "USE_DB_SLUG_QUEUE":
+            return self._use_db_slug_queue
+        return default
+
+    def get(self, key: str, default=None):
+        if key == "DATABASE_URL":
+            return self._database_url
+        return default
+
+
+def _make_crawler(*, use_db_slug_queue: bool, database_url: str | None):
+    return SimpleNamespace(
+        settings=FakeSettings(
+            use_db_slug_queue=use_db_slug_queue,
+            database_url=database_url,
+        )
+    )
+
+
 def _build_item(**overrides):
     item = RawListingItem()
     item.update(
@@ -116,6 +142,29 @@ def test_open_spider_requires_database_url():
         pipeline.open_spider(SimpleNamespace(name="otodom"))
 
 
+def test_from_crawler_disabled_by_default_flag():
+    crawler = _make_crawler(use_db_slug_queue=False, database_url="postgresql://example/test")
+
+    with pytest.raises(NotConfigured, match="USE_DB_SLUG_QUEUE=False"):
+        DatabasePipeline.from_crawler(crawler)
+
+
+def test_from_crawler_requires_database_url_when_enabled():
+    crawler = _make_crawler(use_db_slug_queue=True, database_url=None)
+
+    with pytest.raises(NotConfigured, match="DATABASE_URL is required"):
+        DatabasePipeline.from_crawler(crawler)
+
+
+def test_from_crawler_enabled_with_database_url():
+    crawler = _make_crawler(use_db_slug_queue=True, database_url="postgresql://example/test")
+
+    pipeline = DatabasePipeline.from_crawler(crawler)
+
+    assert isinstance(pipeline, DatabasePipeline)
+    assert pipeline.database_url == "postgresql://example/test"
+
+
 def test_process_item_stores_raw_listing():
     connection = FakeConnection(fetchone_results=[("raw-listing-uuid",)])
     pipeline = DatabasePipeline(database_url="postgresql://example/test")
@@ -159,6 +208,7 @@ def test_process_item_ignores_unique_violation():
     pipeline.connection = connection
 
     assert pipeline.process_item(_build_item(), spider=SimpleNamespace(name="otodom"))
+    assert pipeline._raw_listing_duplicates == 1
 
 
 def test_process_item_writes_rejection_file_on_db_error(tmp_path):
@@ -175,6 +225,8 @@ def test_process_item_writes_rejection_file_on_db_error(tmp_path):
 
     with pytest.raises(DropItem, match="db_error"):
         pipeline.process_item(_build_item(), spider=SimpleNamespace(name="otodom"))
+
+    assert pipeline._raw_listing_errors == 1
 
     pipeline._reject_file.close()
     contents = (tmp_path / "rejected_otodom.jsonl").read_text(encoding="utf-8").strip()
@@ -247,6 +299,52 @@ def test_process_slug_item_logs_warning_on_error():
     # Should not raise — slug errors are non-fatal
     result = pipeline.process_item(_build_slug_item())
     assert isinstance(result, SlugCollectionItem)
+    assert pipeline._raw_slug_errors == 1
+
+
+def test_process_item_success_increments_listing_counter():
+    connection = FakeConnection(fetchone_results=[])
+    pipeline = DatabasePipeline(database_url="postgresql://example/test")
+    pipeline.connection = connection
+
+    result = pipeline.process_item(_build_item(), spider=SimpleNamespace(name="otodom"))
+
+    assert isinstance(result, RawListingItem)
+    assert pipeline._raw_listing_inserted == 1
+
+
+def test_process_slug_item_success_increments_slug_counter():
+    connection = FakeConnection(fetchone_results=[])
+    pipeline = DatabasePipeline(database_url="postgresql://example/test")
+    pipeline.connection = connection
+
+    result = pipeline.process_item(_build_slug_item())
+
+    assert isinstance(result, SlugCollectionItem)
+    assert pipeline._raw_slug_inserted == 1
+
+
+def test_close_spider_logs_summary_with_bounded_counters():
+    connection = FakeConnection(fetchone_results=[])
+    pipeline = DatabasePipeline(database_url="postgresql://example/test")
+    pipeline.connection = connection
+    pipeline._logger = Mock()
+    pipeline._raw_listing_inserted = 3
+    pipeline._raw_listing_duplicates = 1
+    pipeline._raw_listing_errors = 2
+    pipeline._raw_slug_inserted = 5
+    pipeline._raw_slug_errors = 1
+
+    pipeline.close_spider(SimpleNamespace(name="otodom"))
+
+    pipeline._logger.info.assert_called_with(
+        "Database pipeline summary",
+        raw_listing_inserted=3,
+        raw_listing_duplicates=1,
+        raw_listing_errors=2,
+        raw_slug_inserted=5,
+        raw_slug_errors=1,
+    )
 
 
 # ── storage.db helpers ────────────────────────────────────────────────────
@@ -278,7 +376,11 @@ def test_build_slug_run_record_maps_fields():
             "ended_at": "2026-03-29T09:05:00+00:00",
             "runtime_seconds": 300.0,
             "completion_reason": "finished",
-            "parameters": {"city": "krakow", "max_pages": "5"},
+            "parameters": {
+                "city": "krakow",
+                "max_pages": "5",
+                "use_db_slug_queue": True,
+            },
             "total_advertised": 200,
             "investments_found": 3,
             "slug_count": 195,
@@ -290,7 +392,11 @@ def test_build_slug_run_record_maps_fields():
     assert record["city"] == "krakow"
     assert record["slug_count"] == 195
     assert record["investments_found"] == 3
-    assert record["parameters"] == {"city": "krakow", "max_pages": "5"}
+    assert record["parameters"] == {
+        "city": "krakow",
+        "max_pages": "5",
+        "use_db_slug_queue": True,
+    }
 
 
 def test_refresh_slug_queue_executes_upsert():

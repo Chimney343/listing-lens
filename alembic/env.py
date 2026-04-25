@@ -1,29 +1,11 @@
 from logging.config import fileConfig
-from pathlib import Path
 
 from sqlalchemy import engine_from_config, pool
 from alembic import context
-from pydantic_settings import BaseSettings
+from config.settings import settings
 
 
-class Settings(BaseSettings):
-    DATABASE_URL: str
-
-    model_config = {
-        "env_file": Path(__file__).parent.parent / ".env",
-        "env_file_encoding": "utf-8-sig",  # handles BOM-encoded .env files
-        "extra": "ignore",
-    }
-
-
-settings = Settings()
-
-# SQLAlchemy requires the +psycopg driver token to select psycopg v3.
-# Support plain postgresql:// and postgres:// URLs (e.g. from hosted providers)
-# by rewriting them before handing the URL to SQLAlchemy.
-_raw_url = settings.DATABASE_URL
-if _raw_url.startswith(("postgresql://", "postgres://")):
-    _raw_url = _raw_url.replace("://", "+psycopg://", 1)
+_raw_url = settings.sqlalchemy_database_url
 
 config = context.config
 config.set_main_option("sqlalchemy.url", _raw_url)
@@ -34,7 +16,22 @@ if config.config_file_name is not None:
 target_metadata = None
 
 
+def _confirm_production_migration() -> None:
+    if settings.env != "production":
+        return
+
+    print(f"[alembic] ENV=production DATABASE_HOST={settings.database_host}")
+    try:
+        answer = input("Apply migration to production database? [y/N]: ").strip().lower()
+    except EOFError as error:
+        raise RuntimeError("Migration aborted: no confirmation input available") from error
+
+    if answer not in {"y", "yes"}:
+        raise RuntimeError("Migration aborted by user")
+
+
 def run_migrations_offline() -> None:
+    _confirm_production_migration()
     url = config.get_main_option("sqlalchemy.url")
     context.configure(
         url=url,
@@ -47,6 +44,7 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    _confirm_production_migration()
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",

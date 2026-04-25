@@ -1,8 +1,17 @@
 """Scrapy settings for the property scraper project."""
 
-import os
 import sys
 from pathlib import Path
+
+# Ensure root-level modules are importable when scrapy runs from scrapy_project/.
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from config.settings import settings as app_settings
+from property_scraper.playwright_shutdown import patch_threaded_loop_adapter
+
+patch_threaded_loop_adapter()
 
 BOT_NAME = "property_scraper"
 SPIDER_MODULES = ["property_scraper.spiders"]
@@ -65,7 +74,7 @@ USER_AGENT = (
 
 # ─── DOWNLOADER MIDDLEWARES ──────────────────────────────────
 DOWNLOADER_MIDDLEWARES = {
-    "scrapy_impersonate.RandomBrowserMiddleware": 500,
+    "property_scraper.middlewares.RandomBrowserMiddlewareCompat": 500,
     "scrapy.downloadermiddlewares.useragent.UserAgentMiddleware": None,
     # NOTE: Scrapy's RetryMiddleware is disabled because scrapy-playwright has
     # its own built-in retry mechanism that handles browser-specific failures
@@ -73,6 +82,8 @@ DOWNLOADER_MIDDLEWARES = {
     # The RETRY_* settings below are kept for documentation purposes but are
     # not actively used by the disabled middleware.
     "scrapy.downloadermiddlewares.retry.RetryMiddleware": None,
+    # Propagates correlation IDs and bounded request failure telemetry.
+    "property_scraper.middlewares.CorrelationIdMiddleware": 850,
 }
 
 # ─── AUTOTHROTTLE ────────────────────────────────────────────
@@ -127,7 +138,7 @@ DEFAULT_REQUEST_HEADERS = {
 ROBOTSTXT_OBEY = False  # Portals block scrapers via robots.txt
 
 # ─── LOGGING ─────────────────────────────────────────────────
-LOG_LEVEL = "INFO"
+LOG_LEVEL = app_settings.log_level
 LOG_ENCODING = "utf-8"
 LOG_FORMAT = "%(asctime)s [%(name)s] %(levelname)s: %(message)s"
 LOG_DATEFORMAT = "%Y-%m-%d %H:%M:%S"
@@ -142,7 +153,8 @@ _logging.getLogger("scrapy-playwright").setLevel(_logging.WARNING)
 _logging.getLogger("playwright").setLevel(_logging.WARNING)
 
 LOG_DIR = Path(__file__).resolve().parents[2] / "logs"
-DATABASE_URL = os.environ.get("DATABASE_URL")
+DATABASE_URL = app_settings.database_url
+USE_DB_SLUG_QUEUE = app_settings.use_db_slug_queue
 
 # Configure structured logging if available
 try:
@@ -150,8 +162,9 @@ try:
     configure_logging(
         log_level=LOG_LEVEL,
         log_dir=LOG_DIR,
-        json_format=False,  # Set to True in production
+        json_format=app_settings.json_logs,
         enable_file_logging=True,
+        enable_console_logging=False,
     )
 except ImportError:
     # Expected when logging_config.py is not available
@@ -176,11 +189,11 @@ ITEM_PIPELINES = {
     "property_scraper.pipelines.ValidationPipeline": 100,
     "property_scraper.pipelines.PiiFilterPipeline": 200,
     "property_scraper.pipelines.PhotoDownloadPipeline": 300,
-    # "property_scraper.pipelines.DatabasePipeline": 400,
+    "property_scraper.pipelines.DatabasePipeline": 400,
 }
 
 # ─── PII FILTER ──────────────────────────────────────────────
-# Set PII_ENABLED = False to bypass redaction entirely (e.g. in development).
+# PII redaction stays enabled in all environments.
 PII_ENABLED = True
 # Entity types forwarded to Presidio. Add "PERSON" here once a Polish spaCy
 # model is available (see Stage B note in pii_filter.py).

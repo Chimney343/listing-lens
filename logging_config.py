@@ -22,6 +22,7 @@ def configure_logging(
     log_dir: Optional[Path] = None,
     json_format: bool = False,
     enable_file_logging: bool = True,
+    enable_console_logging: bool = True,
 ) -> None:
     """
     Configure structured logging for the application.
@@ -31,6 +32,7 @@ def configure_logging(
         log_dir: Directory for log files. If None, logs go to stdout only.
         json_format: Use JSON format for logs (True for production)
         enable_file_logging: Enable file logging with rotation
+        enable_console_logging: Enable stdout console logging
     """
     if log_dir and enable_file_logging:
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -46,9 +48,6 @@ def configure_logging(
     root_logger.setLevel(logging.DEBUG)
     root_logger.handlers.clear()
 
-    console_handler = logging.StreamHandler(sys.stdout)
-    # Console only shows INFO and above; DEBUG goes to file only
-    console_handler.setLevel(getattr(logging, log_level.upper()))
     if json_format:
         console_formatter = logging.Formatter("%(message)s")
     else:
@@ -56,8 +55,13 @@ def configure_logging(
             "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )
-    console_handler.setFormatter(console_formatter)
-    root_logger.addHandler(console_handler)
+
+    if enable_console_logging:
+        console_handler = logging.StreamHandler(sys.stdout)
+        # Console only shows INFO and above; DEBUG goes to file only
+        console_handler.setLevel(getattr(logging, log_level.upper()))
+        console_handler.setFormatter(console_formatter)
+        root_logger.addHandler(console_handler)
 
     if log_dir and enable_file_logging:
         app_log_path = log_dir / "application.log"

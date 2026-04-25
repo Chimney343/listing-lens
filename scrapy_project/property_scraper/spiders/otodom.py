@@ -13,6 +13,15 @@ from scrapy.loader import ItemLoader
 from scrapy_playwright.page import PageMethod
 
 try:
+    from logging_config import clear_correlation_id, set_correlation_id
+except ImportError:
+    def set_correlation_id(cid=None):
+        return cid
+
+    def clear_correlation_id():
+        return None
+
+try:
     from otodom_config import OtodomSpiderConfig
 except ImportError:
     # Fallback for when running from scrapy_project directory
@@ -20,7 +29,15 @@ except ImportError:
     sys.path.insert(0, '..')
     from otodom_config import OtodomSpiderConfig
 
-from property_scraper.area_config import SearchArea, build_otodom_url
+from property_scraper.area_config import (
+    OTODOM_BUILDING_MATERIAL_VALUES,
+    OTODOM_EXTRAS_VALUES,
+    OTODOM_ROOMS_NUMBER_VALUES,
+    SearchArea,
+    build_otodom_url,
+    normalize_otodom_categorical_values,
+    split_csv_values,
+)
 from property_scraper.items import (
     RawListingItem,
     RawJsonItem,
@@ -122,6 +139,53 @@ def _pw_meta(investment: bool = False) -> dict:
 _PROPERTY_TYPE_MAP = {"mieszkanie": "apartment", "dom": "house"}
 
 
+def _to_bool_flag(value: str | bool | None) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() not in {"0", "false", "", "no", "off"}
+
+
+def _to_optional_int(value: str | int | None) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if not text or text.lower() == "null":
+        return None
+    return int(text)
+
+
+def _to_optional_float(value: str | int | float | None) -> float | int | None:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value
+    text = str(value).strip()
+    if not text or text.lower() == "null":
+        return None
+    if "." not in text:
+        return int(text)
+    return float(text)
+
+
+def _parse_otodom_categorical(
+    value: str | list[str] | tuple[str, ...] | None,
+    *,
+    field_name: str,
+    allowed_values: list[str],
+) -> list[str]:
+    return normalize_otodom_categorical_values(
+        value,
+        allowed_values=allowed_values,
+        field_name=field_name,
+    )
+
+
 def _parse_next_data(response) -> dict | None:
     """Parse the ``__NEXT_DATA__`` JSON block from an Otodom response.
 
@@ -159,6 +223,9 @@ class OtodomSlugSpider(scrapy.Spider):
     @classmethod
     def from_crawler(cls, crawler, *args, **kwargs):
         spider = super().from_crawler(crawler, *args, **kwargs)
+        if spider._use_db_slug_queue_raw is None:
+            spider.use_db_slug_queue = crawler.settings.getbool("USE_DB_SLUG_QUEUE", False)
+        spider._parameters["use_db_slug_queue"] = spider.use_db_slug_queue
         spider.run_dir.mkdir(parents=True, exist_ok=True)
         slug_path = str(spider.run_dir / "slug_collection.jsonl")
         crawler.settings.set(
@@ -182,10 +249,23 @@ class OtodomSlugSpider(scrapy.Spider):
         powiat: str = "mielecki",
         gmina: str = "gmina-miejska--mielec",
         property_type: str = "mieszkanie",
-        districts: str = "",
-        price_min: str | None = None,
-        price_max: str | None = None,
-        max_pages: str | None = None,
+        districts: str | list[str] = "",
+        price_min: str | int | None = None,
+        price_max: str | int | None = None,
+        area_min: str | int | float | None = None,
+        area_max: str | int | float | None = None,
+        terrain_area_min: str | int | float | None = None,
+        terrain_area_max: str | int | float | None = None,
+        price_per_meter_min: str | int | None = None,
+        price_per_meter_max: str | int | None = None,
+        build_year_min: str | int | None = None,
+        build_year_max: str | int | None = None,
+        rooms_number: str | list[str] | None = None,
+        building_material: str | list[str] | None = None,
+        extras: str | list[str] | None = None,
+        max_pages: str | int | None = None,
+        use_db_slug_queue: str | None = None,
+        correlation_id: str | None = None,
         config: Optional[OtodomSpiderConfig] = None,
         config_file: Optional[str] = None,
         **kwargs,
@@ -200,7 +280,7 @@ class OtodomSlugSpider(scrapy.Spider):
                 config = load_config_from_file(config_file)
                 self._log.info("Loaded config from file", config_file=config_file)
             except Exception as e:
-                self._log.error("Failed to load config", config_file=config_file, error=str(e))
+                self._log.error("Failed to load config file", config_file=config_file, error=str(e))
                 raise
 
         if config is not None:
@@ -212,7 +292,23 @@ class OtodomSlugSpider(scrapy.Spider):
             districts = config.districts
             price_min = config.price_min
             price_max = config.price_max
+            area_min = config.area_min
+            area_max = config.area_max
+            terrain_area_min = config.terrain_area_min
+            terrain_area_max = config.terrain_area_max
+            price_per_meter_min = config.price_per_meter_min
+            price_per_meter_max = config.price_per_meter_max
+            build_year_min = config.build_year_min
+            build_year_max = config.build_year_max
+            rooms_number = config.rooms_number
+            building_material = config.building_material
+            extras = config.extras
             max_pages = config.max_pages
+            if use_db_slug_queue is None:
+                use_db_slug_queue = config.use_db_slug_queue
+
+        self._use_db_slug_queue_raw = use_db_slug_queue
+        self.use_db_slug_queue = _to_bool_flag(use_db_slug_queue)
 
         self._parameters = {
             "city": city,
@@ -223,10 +319,26 @@ class OtodomSlugSpider(scrapy.Spider):
             "districts": districts,
             "price_min": price_min,
             "price_max": price_max,
+            "area_min": area_min,
+            "area_max": area_max,
+            "terrain_area_min": terrain_area_min,
+            "terrain_area_max": terrain_area_max,
+            "price_per_meter_min": price_per_meter_min,
+            "price_per_meter_max": price_per_meter_max,
+            "build_year_min": build_year_min,
+            "build_year_max": build_year_max,
+            "rooms_number": rooms_number,
+            "building_material": building_material,
+            "extras": extras,
             "max_pages": max_pages,
+            "use_db_slug_queue": self.use_db_slug_queue,
         }
 
         self._run_id = str(uuid4())
+        raw_correlation_id = (correlation_id or "").strip()
+        self._correlation_id = raw_correlation_id or self._run_id
+        self._parameters["correlation_id"] = self._correlation_id
+        self._log = self._log.bind(correlation_id=self._correlation_id, run_id=self._run_id)
         self.run_timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         self._started_at = None
         self._run_dir = None
@@ -241,10 +353,33 @@ class OtodomSlugSpider(scrapy.Spider):
                 powiat=powiat,
                 gmina=gmina,
                 property_type=property_type,
-                districts=[d.strip() for d in districts.split(",") if d.strip()],
-                price_min=int(price_min) if price_min and price_min.lower() != "null" else None,
-                price_max=int(price_max) if price_max and price_max.lower() != "null" else None,
-                max_pages=int(max_pages) if max_pages and max_pages.lower() != "null" else None,
+                districts=split_csv_values(districts),
+                price_min=_to_optional_int(price_min),
+                price_max=_to_optional_int(price_max),
+                area_min=_to_optional_float(area_min),
+                area_max=_to_optional_float(area_max),
+                terrain_area_min=_to_optional_float(terrain_area_min),
+                terrain_area_max=_to_optional_float(terrain_area_max),
+                price_per_meter_min=_to_optional_int(price_per_meter_min),
+                price_per_meter_max=_to_optional_int(price_per_meter_max),
+                build_year_min=_to_optional_int(build_year_min),
+                build_year_max=_to_optional_int(build_year_max),
+                rooms_number=_parse_otodom_categorical(
+                    rooms_number,
+                    field_name="rooms_number",
+                    allowed_values=OTODOM_ROOMS_NUMBER_VALUES,
+                ),
+                building_material=_parse_otodom_categorical(
+                    building_material,
+                    field_name="building_material",
+                    allowed_values=OTODOM_BUILDING_MATERIAL_VALUES,
+                ),
+                extras=_parse_otodom_categorical(
+                    extras,
+                    field_name="extras",
+                    allowed_values=OTODOM_EXTRAS_VALUES,
+                ),
+                max_pages=_to_optional_int(max_pages),
             )
 
     @property
@@ -257,6 +392,7 @@ class OtodomSlugSpider(scrapy.Spider):
     # ─── Phase 1: collect slugs from all search pages ────────────
 
     async def start(self):
+        set_correlation_id(self._correlation_id)
         self._started_at = datetime.now(timezone.utc)
         price_range = f"{self.area.price_min or '?'}–{self.area.price_max or '?'} PLN"
         self._log.info(
@@ -288,7 +424,7 @@ class OtodomSlugSpider(scrapy.Spider):
         self._search_pages_received: int = 0
 
         self._log.info(
-            "Bootstrap",
+            "Search pagination discovered",
             total_items=self._total_items,
             total_pages=total_pages,
             capped_at=self._total_pages if self.area.max_pages is not None else None,
@@ -355,7 +491,7 @@ class OtodomSlugSpider(scrapy.Spider):
                 expected_units=expected,
             )
         else:
-            self._log.debug("Investment re-seen on page", page=page, slug=slug)
+            self._log.debug("Investment already seen on page", page=page, slug=slug)
 
     # ─── Phase 1.5: expand investments into unit slugs ───────────
 
@@ -462,7 +598,7 @@ class OtodomSlugSpider(scrapy.Spider):
         } - {inv_slug}
         self._slugs.update(unit_slugs)
         self._log.warning(
-            "HTML fallback collected unit slugs (may be incomplete)",
+            "HTML fallback used for investment units; results may be incomplete",
             inv_slug=inv_slug,
             unit_slugs_found=len(unit_slugs),
         )
@@ -494,7 +630,7 @@ class OtodomSlugSpider(scrapy.Spider):
     def _finish_all_collection(self):
         """All slugs and investments resolved."""
         self._log.info(
-            "Done. Run detail spider",
+            "Slug collection complete. Next: run detail spider",
             city=self.area.city,
             hint="scrapy crawl otodom_detail -a city=<city> -a slug_collection_file=<path to slug_collection.jsonl>",
         )
@@ -515,7 +651,7 @@ class OtodomSlugSpider(scrapy.Spider):
     def _parse_search_data(self, response) -> dict | None:
         data = _parse_next_data(response)
         if data is None:
-            self._log.warning("No __NEXT_DATA__ found", url=response.url)
+            self._log.warning("Page missing expected data structure", url=response.url)
             return None
         return (
             data.get("props", {})
@@ -526,35 +662,39 @@ class OtodomSlugSpider(scrapy.Spider):
 
     def closed(self, reason):
         self._ended_at = datetime.now(timezone.utc)
-        if self._started_at is not None:
-            try:
-                self.run_dir.mkdir(parents=True, exist_ok=True)
-                slug_run_meta_file = self.run_dir / "slug_run_meta.jsonl"
-                runtime_seconds = (self._ended_at - self._started_at).total_seconds()
-                slug_run = SlugRunMetaItem()
-                slug_run["run_id"] = self._run_id
-                slug_run["portal"] = "otodom"
-                slug_run["city"] = self.area.city
-                slug_run["started_at"] = self._started_at.isoformat(timespec="seconds")
-                slug_run["ended_at"] = self._ended_at.isoformat(timespec="seconds")
-                slug_run["runtime_seconds"] = runtime_seconds
-                slug_run["completion_reason"] = reason
-                slug_run["parameters"] = self._parameters
-                slug_run["total_advertised"] = getattr(self, "_total_items", 0)
-                slug_run["investments_found"] = getattr(self, "_investments_found", 0)
-                slug_run["slug_count"] = len(getattr(self, "_slugs", set()))
-                with open(slug_run_meta_file, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(dict(slug_run)) + "\n")
-                self._log.info(
-                    "Spider completed",
-                    runtime_seconds=round(runtime_seconds, 1),
-                    reason=reason,
-                    slug_count=slug_run["slug_count"],
-                )
-            except OSError as e:
-                self._log.error("Failed to write run record", error=str(e), exc_info=True)
+        try:
+            if self._started_at is not None:
+                try:
+                    self.run_dir.mkdir(parents=True, exist_ok=True)
+                    slug_run_meta_file = self.run_dir / "slug_run_meta.jsonl"
+                    runtime_seconds = (self._ended_at - self._started_at).total_seconds()
+                    slug_run = SlugRunMetaItem()
+                    slug_run["run_id"] = self._run_id
+                    slug_run["portal"] = "otodom"
+                    slug_run["city"] = self.area.city
+                    slug_run["started_at"] = self._started_at.isoformat(timespec="seconds")
+                    slug_run["ended_at"] = self._ended_at.isoformat(timespec="seconds")
+                    slug_run["runtime_seconds"] = runtime_seconds
+                    slug_run["completion_reason"] = reason
+                    slug_run["parameters"] = self._parameters
+                    slug_run["total_advertised"] = getattr(self, "_total_items", 0)
+                    slug_run["investments_found"] = getattr(self, "_investments_found", 0)
+                    slug_run["slug_count"] = len(getattr(self, "_slugs", set()))
+                    with open(slug_run_meta_file, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(dict(slug_run)) + "\n")
+                    self._log.info(
+                        "Spider completed",
+                        runtime_seconds=round(runtime_seconds, 1),
+                        reason=reason,
+                        slug_count=slug_run["slug_count"],
+                    )
+                except OSError as e:
+                    self._log.error("Failed to write slug run metadata", error=str(e), exc_info=True)
 
-            self._write_slug_run_to_db(slug_run)
+                if self.use_db_slug_queue:
+                    self._write_slug_run_to_db(slug_run)
+        finally:
+            clear_correlation_id()
 
     def _write_slug_run_to_db(self, slug_run: SlugRunMetaItem) -> None:
         """Write the completed slug run record to the slug_runs table.
@@ -565,7 +705,11 @@ class OtodomSlugSpider(scrapy.Spider):
         """
         database_url = self.settings.get("DATABASE_URL")
         if not database_url:
+            self._log.warning(
+                "DB slug queue enabled but DATABASE_URL is not set; skipping DB handoff"
+            )
             return
+        conn = None
         try:
             from storage import db as storage_db
             conn = storage_db.connect(database_url)
@@ -576,10 +720,21 @@ class OtodomSlugSpider(scrapy.Spider):
                         storage_db.SLUG_RUN_INSERT_SQL,
                         [record[col] for col in storage_db.SLUG_RUN_COLUMNS],
                     )
-            conn.close()
-            self._log.info("Slug run record written to DB", run_id=slug_run["run_id"])
+            self._log.info(
+                "Slug run record saved",
+                run_id=slug_run["run_id"],
+            )
+            refreshed_rows = storage_db.refresh_slug_queue(conn)
+            self._log.info(
+                "Slug queue refreshed",
+                run_id=slug_run["run_id"],
+                refreshed_rows=refreshed_rows,
+            )
         except Exception as e:
             self._log.error("Failed to write slug run to DB", error=str(e), exc_info=True)
+        finally:
+            if conn is not None:
+                conn.close()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -598,8 +753,9 @@ class OtodomDetailSpider(scrapy.Spider):
        Reads the ``SlugCollectionItem`` records written by :class:`OtodomSlugSpider`
        and scrapes every slug it contains.  This is the canonical hand-off
        between the two spiders when running locally via ``chain_otodom.py``.
-    4. **Database mode** (not yet implemented): when none of the above are
-       given the spider will query the DB for stale slugs.
+     4. **Database mode**: when none of the above are
+         given and ``use_db_slug_queue`` is enabled, the spider queries
+         the DB queue for pending slugs.
 
     Usage::
 
@@ -615,6 +771,8 @@ class OtodomDetailSpider(scrapy.Spider):
     @classmethod
     def from_crawler(cls, crawler, *args, **kwargs):
         spider = super().from_crawler(crawler, *args, **kwargs)
+        if spider._use_db_slug_queue_raw is None:
+            spider.use_db_slug_queue = crawler.settings.getbool("USE_DB_SLUG_QUEUE", False)
         spider.run_dir.mkdir(parents=True, exist_ok=True)
         parsed_path = str(spider.run_dir / "output.jsonl")
         raw_path = str(spider.run_dir / "raw_output.jsonl")
@@ -645,9 +803,14 @@ class OtodomDetailSpider(scrapy.Spider):
         slug: str | None = None,
         slugs_file: str = "",
         slug_collection_file: str = "",
+        use_db_slug_queue: str | None = None,
+        correlation_id: str | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
+        self._use_db_slug_queue_raw = use_db_slug_queue
+        self.use_db_slug_queue = _to_bool_flag(use_db_slug_queue)
+        self._db_connection = None
         self.single_slug = slug
         if slug_collection_file:
             self._slugs_list: list[str] = self._read_slug_collection_file(slug_collection_file)
@@ -662,12 +825,18 @@ class OtodomDetailSpider(scrapy.Spider):
             inferred_city = None
         self.city = city or inferred_city or ""
         self.run_timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        raw_correlation_id = (correlation_id or "").strip()
+        self._correlation_id = raw_correlation_id or self.run_timestamp
         self._started_at = None
         self._ended_at = None
         self._run_dir = None
         self._detail_scraped = 0
         self._detail_total = 0
-        self._log = structlog.get_logger(type(self).__name__).bind(spider=self.name)
+        self._log = structlog.get_logger(type(self).__name__).bind(
+            spider=self.name,
+            correlation_id=self._correlation_id,
+            run_id=self._correlation_id,
+        )
 
     @property
     def run_dir(self) -> Path:
@@ -677,6 +846,7 @@ class OtodomDetailSpider(scrapy.Spider):
         return self._run_dir
 
     async def start(self):
+        set_correlation_id(self._correlation_id)
         self._started_at = datetime.now(timezone.utc)
 
         if self.single_slug:
@@ -706,12 +876,69 @@ class OtodomDetailSpider(scrapy.Spider):
                 )
             return
 
-        # DB mode — not yet implemented
+        if self.use_db_slug_queue:
+            self._slugs_list = self._read_pending_slugs_from_db()
+            if not self._slugs_list:
+                self._log.info("No pending slugs in database queue")
+                raise CloseSpider("no_pending_slugs")
+
+            self._detail_total = len(self._slugs_list)
+            self._log.info(
+                "DB mode",
+                slug_count=self._detail_total,
+                city=self.city or "unset",
+            )
+            for slug in self._slugs_list:
+                yield scrapy.Request(
+                    f"https://www.otodom.pl/pl/oferta/{slug}",
+                    callback=self.parse_detail,
+                    errback=self._on_detail_error,
+                    meta=_pw_meta(),
+                )
+            return
+
         self._log.error(
-            "No slugs provided and database mode not yet implemented",
-            hint="Pass -a slugs=slug1,slug2,... or -a slug=single-slug",
+            "No slugs specified",
+            hint=(
+                "Pass -a slugs=slug1,slug2,..., "
+                "-a slug=single-slug, -a slug_collection_file=<path>, "
+                "or enable DB mode with use_db_slug_queue"
+            ),
         )
-        raise CloseSpider("db_mode_not_implemented")
+        raise CloseSpider("no_slugs_provided")
+
+    def _ensure_db_connection(self):
+        if self._db_connection is not None:
+            return self._db_connection
+
+        database_url = self.settings.get("DATABASE_URL")
+        if not database_url:
+            raise CloseSpider("db_mode_missing_database_url")
+
+        from storage import db as storage_db
+
+        self._db_connection = storage_db.connect(database_url)
+        return self._db_connection
+
+    def _read_pending_slugs_from_db(self) -> list[str]:
+        conn = self._ensure_db_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT slug
+                    FROM slugs
+                    WHERE portal = %s
+                      AND scrape_status = 'pending'
+                    ORDER BY last_seen_at DESC NULLS LAST, first_seen_at ASC
+                    """,
+                    ("otodom",),
+                )
+                rows = cursor.fetchall()
+            return [row[0] for row in rows if row and row[0]]
+        except Exception as error:
+            self._log.error("Failed to query pending slugs from database", error=str(error), exc_info=True)
+            raise CloseSpider("db_mode_query_failed") from error
 
     @staticmethod
     def _read_slug_collection_file(path: str) -> list[str]:
@@ -770,7 +997,7 @@ class OtodomDetailSpider(scrapy.Spider):
             return None
         ad = data.get("props", {}).get("pageProps", {}).get("ad")
         if not ad:
-            self._log.warning("No ad data (soft 404?)", url=response.url)
+            self._log.warning("No listing data on page (likely soft 404)", url=response.url)
         return ad or None
 
     def _build_listing_item(self, ad: dict, response) -> RawListingItem:
@@ -916,30 +1143,37 @@ class OtodomDetailSpider(scrapy.Spider):
 
     def closed(self, reason):
         self._ended_at = datetime.now(timezone.utc)
-        if self._started_at is not None:
-            try:
-                detail_runs_file = self.run_dir / "detail_runs.jsonl"
-                runtime_seconds = (self._ended_at - self._started_at).total_seconds()
-                completion_record = {
-                    "run_id": self.run_timestamp,
-                    "start_time": self._started_at.isoformat(timespec="seconds"),
-                    "end_time": self._ended_at.isoformat(timespec="seconds"),
-                    "runtime_seconds": runtime_seconds,
-                    "runtime_human": f"{runtime_seconds:.1f}s",
-                    "city": self.city,
-                    "slugs_requested": self._detail_total,
-                    "items_scraped": self._detail_scraped,
-                    "completion_reason": reason,
-                    "record_type": "detail_run",
-                }
-                with open(detail_runs_file, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(completion_record) + "\n")
-                self._log.info(
-                    "Detail spider completed",
-                    runtime_seconds=round(runtime_seconds, 1),
-                    items_scraped=self._detail_scraped,
-                    items_total=self._detail_total,
-                    reason=reason,
-                )
-            except OSError as e:
-                self._log.error("Failed to write detail run record", error=str(e), exc_info=True)
+        try:
+            if self._started_at is not None:
+                try:
+                    self.run_dir.mkdir(parents=True, exist_ok=True)
+                    detail_runs_file = self.run_dir / "detail_runs.jsonl"
+                    runtime_seconds = (self._ended_at - self._started_at).total_seconds()
+                    completion_record = {
+                        "run_id": self.run_timestamp,
+                        "start_time": self._started_at.isoformat(timespec="seconds"),
+                        "end_time": self._ended_at.isoformat(timespec="seconds"),
+                        "runtime_seconds": runtime_seconds,
+                        "runtime_human": f"{runtime_seconds:.1f}s",
+                        "city": self.city,
+                        "slugs_requested": self._detail_total,
+                        "items_scraped": self._detail_scraped,
+                        "completion_reason": reason,
+                        "record_type": "detail_run",
+                    }
+                    with open(detail_runs_file, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(completion_record) + "\n")
+                    self._log.info(
+                        "Detail spider completed",
+                        runtime_seconds=round(runtime_seconds, 1),
+                        items_scraped=self._detail_scraped,
+                        items_total=self._detail_total,
+                        reason=reason,
+                    )
+                except OSError as e:
+                    self._log.error("Failed to write detail run record", error=str(e), exc_info=True)
+        finally:
+            if self._db_connection is not None:
+                self._db_connection.close()
+                self._db_connection = None
+            clear_correlation_id()

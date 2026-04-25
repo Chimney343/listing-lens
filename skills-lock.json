@@ -1,6 +1,16 @@
 {
   "version": 1,
   "skills": {
+    "clarify": {
+      "source": "pbakaus/impeccable",
+      "sourceType": "github",
+      "computedHash": "22918eb15984e524bcd1db4f871cff9ab541b38c55979f725d12adf56abd2f36"
+    },
+    "grug-brain-development": {
+      "source": "supersterling/grug-brain-dev",
+      "sourceType": "github",
+      "computedHash": "1e677d16befaa0ad9f6b67d03ee8393b5f9016b728c10f4d1393f9fbf366be4d"
+    },
     "playwright-best-practices": {
       "source": "currents-dev/playwright-best-practices-skill",
       "sourceType": "github",

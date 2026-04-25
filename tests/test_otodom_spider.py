@@ -5,8 +5,8 @@ from datetime import datetime, timezone
 
 import pytest
 import scrapy
+from scrapy.exceptions import CloseSpider
 from scrapy.http import Response, Request, TextResponse
-from scrapy.utils.test import get_crawler
 
 from property_scraper.spiders.otodom import OtodomSlugSpider, OtodomDetailSpider
 from property_scraper.items import (
@@ -335,18 +335,86 @@ class TestSpiderInitialization:
             districts="mokotow,wola",
             price_min="500000",
             price_max="1000000",
+            area_min="25",
+            area_max="50",
+            terrain_area_min="50",
+            terrain_area_max="100",
+            price_per_meter_min="5000",
+            price_per_meter_max="10000",
+            build_year_min="1950",
+            build_year_max="2025",
+            rooms_number="ONE,TWO",
+            building_material="BRICK",
+            extras="HAS_PHOTOS",
             max_pages="10",
         )
         assert spider.area.city == "warszawa"
         assert spider.area.districts == ["mokotow", "wola"]
         assert spider.area.price_min == 500000
         assert spider.area.price_max == 1000000
+        assert spider.area.area_min == 25
+        assert spider.area.area_max == 50
+        assert spider.area.terrain_area_min == 50
+        assert spider.area.terrain_area_max == 100
+        assert spider.area.price_per_meter_min == 5000
+        assert spider.area.price_per_meter_max == 10000
+        assert spider.area.build_year_min == 1950
+        assert spider.area.build_year_max == 2025
+        assert spider.area.rooms_number == ["ONE", "TWO"]
+        assert spider.area.building_material == ["BRICK"]
+        assert spider.area.extras == ["HAS_PHOTOS"]
         assert spider.area.max_pages == 10
         assert spider._parameters["city"] == "warszawa"
         assert spider._parameters["districts"] == "mokotow,wola"
         assert spider._parameters["price_min"] == "500000"
         assert spider._parameters["price_max"] == "1000000"
+        assert spider._parameters["area_min"] == "25"
+        assert spider._parameters["area_max"] == "50"
+        assert spider._parameters["terrain_area_min"] == "50"
+        assert spider._parameters["terrain_area_max"] == "100"
+        assert spider._parameters["price_per_meter_min"] == "5000"
+        assert spider._parameters["price_per_meter_max"] == "10000"
+        assert spider._parameters["build_year_min"] == "1950"
+        assert spider._parameters["build_year_max"] == "2025"
+        assert spider._parameters["rooms_number"] == "ONE,TWO"
+        assert spider._parameters["building_material"] == "BRICK"
+        assert spider._parameters["extras"] == "HAS_PHOTOS"
         assert spider._parameters["max_pages"] == "10"
+
+    def test_slug_spider_use_db_flag_from_argument(self):
+        spider = OtodomSlugSpider(use_db_slug_queue="1")
+
+        assert spider.use_db_slug_queue is True
+        assert spider._parameters["use_db_slug_queue"] is True
+
+    def test_slug_spider_from_crawler_uses_settings_flag(self, tmp_path):
+        class _FakeSettings(dict):
+            def getbool(self, key, default=False):
+                return bool(self.get(key, default))
+
+            def set(self, key, value, priority="project"):
+                self[key] = value
+
+        class _FakeSignals:
+            def connect(self, *_args, **_kwargs):
+                return None
+
+        class _FakeCrawler:
+            def __init__(self):
+                self.settings = _FakeSettings(
+                    {
+                        "DATA_DIR": str(tmp_path),
+                        "USE_DB_SLUG_QUEUE": True,
+                    }
+                )
+                self.signals = _FakeSignals()
+
+        crawler = _FakeCrawler()
+
+        spider = OtodomSlugSpider.from_crawler(crawler)
+
+        assert spider.use_db_slug_queue is True
+        assert spider._parameters["use_db_slug_queue"] is True
 
     def test_detail_spider_single_slug(self):
         spider = OtodomDetailSpider(slug="test-slug-123")
@@ -429,6 +497,17 @@ class TestSpiderInitialization:
             districts="kazimierz,podgorze",
             price_min="300000",
             price_max="800000",
+            area_min="25",
+            area_max="50",
+            terrain_area_min="50",
+            terrain_area_max="100",
+            price_per_meter_min="5000",
+            price_per_meter_max="10000",
+            build_year_min="1950",
+            build_year_max="2025",
+            rooms_number="ONE,TWO,THREE,FIVE,FOUR",
+            building_material="BRICK",
+            extras="IS_BUNGALOV,HAS_PHOTOS",
             max_pages="5",
         )
         expected = {
@@ -440,6 +519,17 @@ class TestSpiderInitialization:
             "districts": "kazimierz,podgorze",
             "price_min": "300000",
             "price_max": "800000",
+            "area_min": "25",
+            "area_max": "50",
+            "terrain_area_min": "50",
+            "terrain_area_max": "100",
+            "price_per_meter_min": "5000",
+            "price_per_meter_max": "10000",
+            "build_year_min": "1950",
+            "build_year_max": "2025",
+            "rooms_number": "ONE,TWO,THREE,FIVE,FOUR",
+            "building_material": "BRICK",
+            "extras": "IS_BUNGALOV,HAS_PHOTOS",
             "max_pages": "5",
         }
         for key, value in expected.items():
@@ -449,27 +539,83 @@ class TestSpiderInitialization:
         spider = OtodomSlugSpider(
             city="test", voivodeship="test", powiat="test", gmina="test",
             property_type="mieszkanie",
-            price_min="null", price_max="NULL", max_pages="Null",
+            price_min="null", price_max="NULL",
+            area_min="null", area_max="NULL",
+            terrain_area_min="null", terrain_area_max="NULL",
+            price_per_meter_min="null", price_per_meter_max="NULL",
+            build_year_min="null", build_year_max="NULL",
+            rooms_number="",
+            building_material="",
+            extras="",
+            max_pages="Null",
         )
         assert spider.area.price_min is None
         assert spider.area.price_max is None
+        assert spider.area.area_min is None
+        assert spider.area.area_max is None
+        assert spider.area.terrain_area_min is None
+        assert spider.area.terrain_area_max is None
+        assert spider.area.price_per_meter_min is None
+        assert spider.area.price_per_meter_max is None
+        assert spider.area.build_year_min is None
+        assert spider.area.build_year_max is None
+        assert spider.area.rooms_number == []
+        assert spider.area.building_material == []
+        assert spider.area.extras == []
         assert spider.area.max_pages is None
 
         spider2 = OtodomSlugSpider(
             city="test", voivodeship="test", powiat="test", gmina="test",
-            property_type="mieszkanie", price_min="", price_max="", max_pages="",
+            property_type="mieszkanie",
+            price_min="", price_max="",
+            area_min="", area_max="",
+            terrain_area_min="", terrain_area_max="",
+            price_per_meter_min="", price_per_meter_max="",
+            build_year_min="", build_year_max="",
+            rooms_number="", building_material="", extras="",
+            max_pages="",
         )
         assert spider2.area.price_min is None
         assert spider2.area.price_max is None
+        assert spider2.area.area_min is None
+        assert spider2.area.area_max is None
+        assert spider2.area.terrain_area_min is None
+        assert spider2.area.terrain_area_max is None
+        assert spider2.area.price_per_meter_min is None
+        assert spider2.area.price_per_meter_max is None
+        assert spider2.area.build_year_min is None
+        assert spider2.area.build_year_max is None
+        assert spider2.area.rooms_number == []
+        assert spider2.area.building_material == []
+        assert spider2.area.extras == []
         assert spider2.area.max_pages is None
 
         spider3 = OtodomSlugSpider(
             city="test", voivodeship="test", powiat="test", gmina="test",
             property_type="mieszkanie",
-            price_min="500000", price_max="1000000", max_pages="10",
+            price_min="500000", price_max="1000000",
+            area_min="25", area_max="50",
+            terrain_area_min="50", terrain_area_max="100",
+            price_per_meter_min="5000", price_per_meter_max="10000",
+            build_year_min="1950", build_year_max="2025",
+            rooms_number="ONE,TWO,THREE,FIVE,FOUR",
+            building_material="BRICK",
+            extras="IS_BUNGALOV,HAS_PHOTOS",
+            max_pages="10",
         )
         assert spider3.area.price_min == 500000
         assert spider3.area.price_max == 1000000
+        assert spider3.area.area_min == 25
+        assert spider3.area.area_max == 50
+        assert spider3.area.terrain_area_min == 50
+        assert spider3.area.terrain_area_max == 100
+        assert spider3.area.price_per_meter_min == 5000
+        assert spider3.area.price_per_meter_max == 10000
+        assert spider3.area.build_year_min == 1950
+        assert spider3.area.build_year_max == 2025
+        assert spider3.area.rooms_number == ["ONE", "TWO", "THREE", "FIVE", "FOUR"]
+        assert spider3.area.building_material == ["BRICK"]
+        assert spider3.area.extras == ["IS_BUNGALOV", "HAS_PHOTOS"]
         assert spider3.area.max_pages == 10
 
 
@@ -509,8 +655,115 @@ class TestStartMethod:
             requests.append(request)
         assert len(requests) == 1
         request = requests[0]
-        assert "page=1" in request.url
+        assert "page=1" not in request.url
+        assert "limit=36" in request.url
+        assert "ownerTypeSingleSelect=ALL" in request.url
         assert request.callback == spider._bootstrap
+
+    @pytest.mark.asyncio
+    async def test_slug_spider_start_uses_canonical_location_url(self):
+        spider = OtodomSlugSpider(
+            city="mielec",
+            voivodeship="podkarpackie",
+            powiat="mielecki",
+            gmina="gmina-miejska--mielec",
+            property_type="dom",
+        )
+
+        requests = []
+        async for request in spider.start():
+            requests.append(request)
+
+        assert len(requests) == 1
+        assert (
+            requests[0].url
+            == "https://www.otodom.pl/pl/wyniki/sprzedaz/dom/podkarpackie/mielecki/gmina-miejska--mielec/mielec?limit=36&ownerTypeSingleSelect=ALL&by=DEFAULT&direction=DESC"
+        )
+
+    @pytest.mark.asyncio
+    async def test_slug_spider_start_uses_full_filter_url(self):
+        spider = OtodomSlugSpider(
+            city="mielec",
+            voivodeship="podkarpackie",
+            powiat="mielecki",
+            gmina="gmina-miejska--mielec",
+            property_type="dom",
+            price_min="5000",
+            price_max="100000",
+            area_min="25",
+            area_max="50",
+            terrain_area_min="50",
+            terrain_area_max="100",
+            price_per_meter_min="5000",
+            price_per_meter_max="10000",
+            build_year_min="1950",
+            build_year_max="2025",
+            rooms_number="ONE,TWO,THREE,FIVE,FOUR",
+            building_material="BRICK",
+            extras="IS_BUNGALOV,HAS_PHOTOS",
+        )
+
+        requests = []
+        async for request in spider.start():
+            requests.append(request)
+
+        assert len(requests) == 1
+        assert (
+            requests[0].url
+            == "https://www.otodom.pl/pl/wyniki/sprzedaz/dom/podkarpackie/mielecki/gmina-miejska--mielec/mielec?limit=36&ownerTypeSingleSelect=ALL&priceMin=5000&priceMax=100000&areaMin=25&areaMax=50&terrainAreaMin=50&terrainAreaMax=100&pricePerMeterMin=5000&pricePerMeterMax=10000&buildYearMin=1950&buildYearMax=2025&roomsNumber=%5BONE%2CTWO%2CTHREE%2CFIVE%2CFOUR%5D&buildingMaterial=%5BBRICK%5D&extras=%5BIS_BUNGALOV%2CHAS_PHOTOS%5D&by=DEFAULT&direction=DESC"
+        )
+
+    @pytest.mark.asyncio
+    async def test_slug_spider_start_sets_correlation_id(self, spider):
+        with patch("property_scraper.spiders.otodom.set_correlation_id", create=True) as mock_set:
+            requests = []
+            async for request in spider.start():
+                requests.append(request)
+
+        assert len(requests) == 1
+        mock_set.assert_called_once_with(spider._run_id)
+
+    @pytest.mark.asyncio
+    async def test_detail_spider_start_sets_correlation_id(self):
+        spider = OtodomDetailSpider(slugs="slug-a", correlation_id="cid-123")
+
+        with patch("property_scraper.spiders.otodom.set_correlation_id", create=True) as mock_set:
+            requests = []
+            async for request in spider.start():
+                requests.append(request)
+
+        assert len(requests) == 1
+        mock_set.assert_called_once_with("cid-123")
+
+    @pytest.mark.asyncio
+    async def test_detail_spider_db_mode_start_reads_pending_slugs(self, detail_spider):
+        detail_spider.use_db_slug_queue = True
+        detail_spider._slugs_list = []
+
+        with patch.object(
+            detail_spider,
+            "_read_pending_slugs_from_db",
+            return_value=["db-slug-1", "db-slug-2"],
+        ):
+            requests = []
+            async for request in detail_spider.start():
+                requests.append(request)
+
+        assert len(requests) == 2
+        assert all("otodom.pl/pl/oferta/" in req.url for req in requests)
+        assert all(req.callback == detail_spider.parse_detail for req in requests)
+
+    @pytest.mark.asyncio
+    async def test_detail_spider_db_mode_start_no_pending_slugs(self, detail_spider):
+        detail_spider.use_db_slug_queue = True
+        detail_spider._slugs_list = []
+
+        with patch.object(detail_spider, "_read_pending_slugs_from_db", return_value=[]):
+            with pytest.raises(CloseSpider) as exc:
+                async for _ in detail_spider.start():
+                    pass
+
+        assert exc.value.reason == "no_pending_slugs"
 
 
 class TestBootstrapMethod:
@@ -768,6 +1021,51 @@ class TestInvestmentHandling:
         assert record["total_advertised"] == 50
         assert record["investments_found"] == 0
         assert record["completion_reason"] == "finished"
+        assert record["parameters"]["use_db_slug_queue"] is False
+
+    def test_closed_writes_flag_and_calls_db_when_enabled(self, spider, tmp_path):
+        spider._slugs = {"slug1", "slug2"}
+        spider._investments = {}
+        spider._investments_found = 0
+        spider._total_items = 20
+        spider._started_at = datetime(2026, 3, 25, 10, 19, 45, tzinfo=timezone.utc)
+        spider.settings = {"DATA_DIR": str(tmp_path)}
+        spider.run_timestamp = "test_timestamp"
+        spider.use_db_slug_queue = True
+        spider._parameters["use_db_slug_queue"] = True
+
+        with patch.object(spider, "_write_slug_run_to_db") as mock_write:
+            spider.closed("finished")
+
+        slug_run_meta_file = tmp_path / "otodom" / "test_timestamp_slugs" / "slug_run_meta.jsonl"
+        with open(slug_run_meta_file, encoding="utf-8") as f:
+            record = json.loads(next(line for line in f if line.strip()))
+
+        assert record["parameters"]["use_db_slug_queue"] is True
+        mock_write.assert_called_once()
+
+    def test_slug_spider_closed_clears_correlation_id(self, spider, tmp_path):
+        spider._slugs = {"slug1"}
+        spider._investments_found = 0
+        spider._total_items = 1
+        spider._started_at = datetime(2026, 3, 25, 10, 19, 45, tzinfo=timezone.utc)
+        spider.settings = {"DATA_DIR": str(tmp_path)}
+        spider.run_timestamp = "test_timestamp"
+
+        with patch("property_scraper.spiders.otodom.clear_correlation_id", create=True) as mock_clear:
+            spider.closed("finished")
+
+        mock_clear.assert_called_once()
+
+    def test_detail_spider_closed_clears_correlation_id(self, detail_spider, tmp_path):
+        detail_spider.settings = {"DATA_DIR": str(tmp_path)}
+        detail_spider.run_timestamp = "test_timestamp"
+        detail_spider._started_at = datetime(2026, 3, 25, 10, 19, 45, tzinfo=timezone.utc)
+
+        with patch("property_scraper.spiders.otodom.clear_correlation_id", create=True) as mock_clear:
+            detail_spider.closed("finished")
+
+        mock_clear.assert_called_once()
 
 
 # ─── Test Property Type Mapping ────────────────────────────────────────────
