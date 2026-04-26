@@ -1,0 +1,23 @@
+# Install for user service mode:
+#   mkdir -p ~/.config/systemd/user
+#   cp systemd/listing-lens-scheduler.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now listing-lens-scheduler.service
+
+[Unit]
+Description=Listing Lens Scheduler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pi/listing-lens
+EnvironmentFile=/home/pi/listing-lens/.env
+ExecStart=/home/pi/.local/bin/poetry run python main.py --jobs-file config/spider_jobs.yaml
+Restart=always
+RestartSec=10
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

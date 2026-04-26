@@ -1,0 +1,55 @@
+search_profiles:
+  krakow_core:
+    city: krakow
+    voivodeship: malopolskie
+    powiat: krakowski
+    gmina: gmina-miejska--krakow
+    property_type: mieszkanie
+    districts:
+      - podgorze
+      - debniki
+    price_min: 450000
+    price_max: 1500000
+    area_min: 25
+    area_max: 50
+    terrain_area_min: 50
+    terrain_area_max: 100
+    price_per_meter_min: 5000
+    price_per_meter_max: 10000
+    build_year_min: 1950
+    build_year_max: 2025
+    rooms_number:
+      - ONE
+      - TWO
+      - THREE
+      - FIVE
+      - FOUR
+    building_material:
+      - BRICK
+    extras:
+      - IS_BUNGALOV
+      - HAS_PHOTOS
+    max_pages: 30
+
+jobs:
+  - job_id: otodom-krakow-slugs-daily
+    enabled: true
+    portal: otodom
+    spider_kind: slugs
+    search_profile: krakow_core
+    use_db_slug_queue: true
+    schedule:
+      type: random_daily
+      start_time: "06:00"
+      end_time: "08:30"
+
+  - job_id: otodom-krakow-detail-interval
+    enabled: false
+    portal: otodom
+    spider_kind: detail
+    search_profile: krakow_core
+    use_db_slug_queue: true
+    schedule:
+      type: interval
+      hours: 8
+      jitter_seconds: 1800

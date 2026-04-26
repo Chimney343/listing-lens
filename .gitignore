@@ -68,6 +68,12 @@ instance/
 # Scrapy stuff:
 .scrapy
 
+# Runtime data
+data/
+logs/
+scrapy_project/rejected_otodom.jsonl
+config/spider_jobs.yaml
+
 # Sphinx documentation
 docs/_build/
 
@@ -200,6 +206,16 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# AI assistant tooling directories
+.agents/
+.claude/
+.roo/
+
+# Scratch / debug scripts (not part of the codebase)
+page_sample.html
+search_hash.py
+show_unit_fields.py
 
 # Marimo
 marimo/_static/

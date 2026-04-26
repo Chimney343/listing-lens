@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "codebase-memory-mcp": {
+      "type": "stdio",
+      "command": "wsl.exe",
+      "args": ["-d", "Ubuntu", "--", "/home/mkkom/.local/bin/codebase-memory-mcp"]
+    }
+  }
+}
