@@ -9,7 +9,8 @@ from unittest.mock import Mock
 import pytest
 from scrapy.exceptions import DropItem, NotConfigured
 
-from storage import db as storage
+from storage import db as slug_storage
+from storage import raw_listings
 from property_scraper.items import RawListingItem, SlugCollectionItem
 from property_scraper.pipelines import DatabasePipeline
 
@@ -179,18 +180,18 @@ def test_process_item_stores_raw_listing():
     assert len(connection.cursor_obj.executed) == 1
 
     raw_sql, raw_params = connection.cursor_obj.executed[0]
-    assert raw_sql == storage.RAW_LISTING_INSERT_SQL
-    assert raw_params[storage.RAW_LISTING_COLUMNS.index("source_portal")] == "otodom"
-    assert raw_params[storage.RAW_LISTING_COLUMNS.index("has_parking")] is True
-    assert raw_params[storage.RAW_LISTING_COLUMNS.index("parking")] == "garage"
-    assert raw_params[storage.RAW_LISTING_COLUMNS.index("description_length")] == 4
-    assert raw_params[storage.RAW_LISTING_COLUMNS.index("has_floor_plan")] is True
-    assert raw_params[storage.RAW_LISTING_COLUMNS.index("date_posted")] == "2026-01-15T10:30:00+00:00"
-    assert raw_params[storage.RAW_LISTING_COLUMNS.index("photo_paths")] == [
+    assert raw_sql == raw_listings.RAW_LISTING_INSERT_SQL
+    assert raw_params[raw_listings.RAW_LISTING_COLUMNS.index("source_portal")] == "otodom"
+    assert raw_params[raw_listings.RAW_LISTING_COLUMNS.index("has_parking")] is True
+    assert raw_params[raw_listings.RAW_LISTING_COLUMNS.index("parking")] == "garage"
+    assert raw_params[raw_listings.RAW_LISTING_COLUMNS.index("description_length")] == 4
+    assert raw_params[raw_listings.RAW_LISTING_COLUMNS.index("has_floor_plan")] is True
+    assert raw_params[raw_listings.RAW_LISTING_COLUMNS.index("date_posted")] == "2026-01-15T10:30:00+00:00"
+    assert raw_params[raw_listings.RAW_LISTING_COLUMNS.index("photo_paths")] == [
         "otodom/123/photo-1.jpg"
     ]
-    assert raw_params[storage.RAW_LISTING_COLUMNS.index("price_pln")] == 850000
-    assert raw_params[storage.RAW_LISTING_COLUMNS.index("price_per_m2")] == 12500
+    assert raw_params[raw_listings.RAW_LISTING_COLUMNS.index("price_pln")] == 850000
+    assert raw_params[raw_listings.RAW_LISTING_COLUMNS.index("price_per_m2")] == 12500
 
 
 def test_process_item_ignores_unique_violation():
@@ -267,10 +268,10 @@ def test_process_slug_item_inserts_raw_slug():
     assert len(connection.cursor_obj.executed) == 1
 
     sql, params = connection.cursor_obj.executed[0]
-    assert sql == storage.RAW_SLUG_INSERT_SQL
-    assert params[storage.RAW_SLUG_COLUMNS.index("slug")] == "mieszkanie-krakow-test-12345"
-    assert params[storage.RAW_SLUG_COLUMNS.index("portal")] == "otodom"
-    assert params[storage.RAW_SLUG_COLUMNS.index("run_id")] == "run-abc"
+    assert sql == slug_storage.RAW_SLUG_INSERT_SQL
+    assert params[slug_storage.RAW_SLUG_COLUMNS.index("slug")] == "mieszkanie-krakow-test-12345"
+    assert params[slug_storage.RAW_SLUG_COLUMNS.index("portal")] == "otodom"
+    assert params[slug_storage.RAW_SLUG_COLUMNS.index("run_id")] == "run-abc"
 
 
 def test_process_slug_item_passes_through_without_connection():
@@ -350,9 +351,19 @@ def test_close_spider_logs_summary_with_bounded_counters():
 # ── storage.db helpers ────────────────────────────────────────────────────
 
 
+def test_build_raw_listing_record_maps_fields():
+    item = _build_item()
+    record = raw_listings.build_raw_listing_record(item)
+
+    assert record["source_portal"] == "otodom"
+    assert record["source_url"] == "https://www.otodom.pl/pl/oferta/test-123"
+    assert record["has_parking"] is True
+    assert record["photo_paths"] == ["otodom/123/photo-1.jpg"]
+
+
 def test_build_raw_slug_record_maps_fields():
     item = _build_slug_item()
-    record = storage.build_raw_slug_record(item)
+    record = slug_storage.build_raw_slug_record(item)
 
     assert record["slug"] == "mieszkanie-krakow-test-12345"
     assert record["portal"] == "otodom"
@@ -386,7 +397,7 @@ def test_build_slug_run_record_maps_fields():
             "slug_count": 195,
         }
     )
-    record = storage.build_slug_run_record(item)
+    record = slug_storage.build_slug_run_record(item)
 
     assert record["run_id"] == "run-xyz"
     assert record["city"] == "krakow"
@@ -401,7 +412,7 @@ def test_build_slug_run_record_maps_fields():
 
 def test_refresh_slug_queue_executes_upsert():
     connection = FakeConnection(fetchone_results=[])
-    storage.refresh_slug_queue(connection)
+    slug_storage.refresh_slug_queue(connection)
 
     assert connection.transaction_count == 1
     assert len(connection.cursor_obj.executed) == 1

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from scheduler.config import SpiderJobManifest
 from scheduler.service import build_trigger, register_jobs
 
@@ -84,6 +87,36 @@ def test_build_trigger_for_interval_schedule():
 
     assert trigger.__class__.__name__ == "IntervalTrigger"
     assert trigger.jitter == 900
+
+
+def test_build_trigger_for_random_daily_schedule(monkeypatch):
+    manifest = SpiderJobManifest.model_validate(
+        {
+            "search_profiles": {"krakow_core": {"city": "krakow"}},
+            "jobs": [
+                {
+                    "job_id": "random-daily-job",
+                    "enabled": True,
+                    "portal": "otodom",
+                    "spider_kind": "slugs",
+                    "search_profile": "krakow_core",
+                    "schedule": {
+                        "type": "random_daily",
+                        "start_time": "06:00",
+                        "end_time": "08:00",
+                    },
+                }
+            ],
+        }
+    )
+    monkeypatch.setattr("scheduler.service.random.randint", lambda start, end: 1800)
+
+    trigger = build_trigger(manifest.jobs[0].schedule)
+    now = datetime(2026, 4, 26, 5, 0, tzinfo=ZoneInfo("Europe/Warsaw"))
+    next_fire_time = trigger.get_next_fire_time(previous_fire_time=None, now=now)
+
+    assert trigger.__class__.__name__ == "RandomDailyTrigger"
+    assert next_fire_time == datetime(2026, 4, 26, 6, 30, tzinfo=ZoneInfo("Europe/Warsaw"))
 
 
 def test_register_jobs_adds_enabled_jobs_only():

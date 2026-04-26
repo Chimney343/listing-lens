@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import time
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -73,7 +74,39 @@ class IntervalSchedule(BaseModel):
         return self
 
 
-ScheduleSpec = Annotated[CronSchedule | IntervalSchedule, Field(discriminator="type")]
+def _parse_clock_time(value: str, *, field_name: str) -> time:
+    try:
+        parsed = time.fromisoformat(value)
+    except ValueError as error:
+        raise ValueError(
+            f"Random daily schedule field '{field_name}' must be a valid HH:MM or HH:MM:SS time"
+        ) from error
+
+    if parsed.tzinfo is not None:
+        raise ValueError(f"Random daily schedule field '{field_name}' must not include timezone info")
+
+    return parsed
+
+
+class RandomDailySchedule(BaseModel):
+    """Run once per day at a random time within a bounded local-time window."""
+
+    type: Literal["random_daily"]
+    start_time: str
+    end_time: str
+
+    @model_validator(mode="after")
+    def validate_window(self) -> "RandomDailySchedule":
+        start_clock = _parse_clock_time(self.start_time, field_name="start_time")
+        end_clock = _parse_clock_time(self.end_time, field_name="end_time")
+
+        if start_clock >= end_clock:
+            raise ValueError("Random daily schedule field 'start_time' must be earlier than 'end_time'")
+
+        return self
+
+
+ScheduleSpec = Annotated[CronSchedule | IntervalSchedule | RandomDailySchedule, Field(discriminator="type")]
 
 
 class SpiderJob(BaseModel):

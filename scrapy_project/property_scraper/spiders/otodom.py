@@ -701,7 +701,8 @@ class OtodomSlugSpider(scrapy.Spider):
 
         A direct connection is used here because the pipeline connection is
         already closed by the time ``spider.closed()`` is called.
-        Silently skipped when DATABASE_URL is not configured.
+        Silently skipped when DATABASE_URL is not configured. Queue refresh is
+        intentionally handled by the caller that orchestrates the slug job.
         """
         database_url = self.settings.get("DATABASE_URL")
         if not database_url:
@@ -723,12 +724,6 @@ class OtodomSlugSpider(scrapy.Spider):
             self._log.info(
                 "Slug run record saved",
                 run_id=slug_run["run_id"],
-            )
-            refreshed_rows = storage_db.refresh_slug_queue(conn)
-            self._log.info(
-                "Slug queue refreshed",
-                run_id=slug_run["run_id"],
-                refreshed_rows=refreshed_rows,
             )
         except Exception as e:
             self._log.error("Failed to write slug run to DB", error=str(e), exc_info=True)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 from datetime import datetime, timezone
 
+from config.settings import settings
 from logging_config import get_logger
 from scheduler.config import SpiderJob, SpiderJobManifest
 from scheduler.jobs import SCRAPY_DIR, build_spider_command
@@ -16,6 +17,20 @@ _log = get_logger(__name__)
 def _default_correlation_id(job_id: str) -> str:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
     return f"{job_id}-{timestamp}"
+
+
+def _refresh_slug_queue_after_slug_job(*, job: SpiderJob, correlation_id: str) -> int:
+    database_url = settings.require_database_url(
+        context=f"scheduler job '{job.job_id}' slug queue refresh"
+    )
+
+    from storage import db as slug_storage
+
+    conn = slug_storage.connect(database_url)
+    try:
+        return slug_storage.refresh_slug_queue(conn)
+    finally:
+        conn.close()
 
 
 def run_job(
@@ -64,5 +79,31 @@ def run_job(
         return_code=result.returncode,
         correlation_id=effective_correlation_id,
     )
+
+    if job.spider_kind == "slugs" and job.use_db_slug_queue:
+        try:
+            refreshed_rows = _refresh_slug_queue_after_slug_job(
+                job=job,
+                correlation_id=effective_correlation_id,
+            )
+        except Exception:
+            _log.error(
+                "Scheduled slug queue refresh failed",
+                job_id=job.job_id,
+                portal=job.portal,
+                spider_kind=job.spider_kind,
+                correlation_id=effective_correlation_id,
+                exc_info=True,
+            )
+            raise
+
+        _log.info(
+            "Scheduled slug queue refreshed",
+            job_id=job.job_id,
+            portal=job.portal,
+            spider_kind=job.spider_kind,
+            refreshed_rows=refreshed_rows,
+            correlation_id=effective_correlation_id,
+        )
 
     return result.returncode

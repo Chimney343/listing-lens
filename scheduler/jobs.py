@@ -20,6 +20,10 @@ def _append_arg(command: list[str], key: str, value: str) -> None:
     command.extend(["-a", f"{key}={value}"])
 
 
+def _append_setting(command: list[str], key: str, value: str) -> None:
+    command.extend(["-s", f"{key}={value}"])
+
+
 def _stringify_arg_value(value: object) -> str:
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
@@ -92,6 +96,7 @@ def build_spider_command(
 
     if job.use_db_slug_queue:
         _append_arg(command, "use_db_slug_queue", "1")
+        _append_setting(command, "USE_DB_SLUG_QUEUE", "1")
 
     if correlation_id:
         _append_arg(command, "correlation_id", correlation_id)

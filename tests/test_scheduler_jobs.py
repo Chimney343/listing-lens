@@ -89,6 +89,7 @@ def test_build_spider_command_for_detail_job_in_db_mode():
 
     assert command[:5] == ["poetry", "run", "scrapy", "crawl", "otodom_detail"]
     assert "use_db_slug_queue=1" in command
+    assert "USE_DB_SLUG_QUEUE=1" in command
     assert "city=krakow" in command
     assert "correlation_id=run-xyz" in command
 

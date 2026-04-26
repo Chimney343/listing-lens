@@ -9,7 +9,8 @@ from scrapy import Spider
 from scrapy.exceptions import DropItem, NotConfigured
 
 from property_scraper.items import RawListingItem, SlugCollectionItem
-from storage import db as storage
+from storage import db as slug_storage
+from storage import raw_listings
 
 logger = structlog.get_logger(__name__)
 
@@ -195,7 +196,7 @@ class DatabasePipeline:
         if not self.database_url:
             raise NotConfigured("DATABASE_URL is required for DatabasePipeline")
 
-        self.connection = storage.connect(self.database_url)
+        self.connection = slug_storage.connect(self.database_url)
 
         if spider is not None and hasattr(spider, "run_dir"):
             spider.run_dir.mkdir(parents=True, exist_ok=True)
@@ -277,14 +278,14 @@ class DatabasePipeline:
         if self.connection is None:
             raise NotConfigured("DatabasePipeline must be opened before processing items")
 
-        record = storage.build_raw_listing_record(item)
+        record = raw_listings.build_raw_listing_record(item)
 
         try:
             with self.connection.transaction():
                 with self.connection.cursor() as cursor:
                     cursor.execute(
-                        storage.RAW_LISTING_INSERT_SQL,
-                        [record[column] for column in storage.RAW_LISTING_COLUMNS],
+                        raw_listings.RAW_LISTING_INSERT_SQL,
+                        [record[column] for column in raw_listings.RAW_LISTING_COLUMNS],
                     )
         except Exception as error:
             if self._is_unique_violation(error):
@@ -319,13 +320,13 @@ class DatabasePipeline:
         if self.connection is None:
             return item
 
-        record = storage.build_raw_slug_record(item)
+        record = slug_storage.build_raw_slug_record(item)
         try:
             with self.connection.transaction():
                 with self.connection.cursor() as cursor:
                     cursor.execute(
-                        storage.RAW_SLUG_INSERT_SQL,
-                        [record[col] for col in storage.RAW_SLUG_COLUMNS],
+                        slug_storage.RAW_SLUG_INSERT_SQL,
+                        [record[col] for col in slug_storage.RAW_SLUG_COLUMNS],
                     )
             self._raw_slug_inserted += 1
         except Exception as error:

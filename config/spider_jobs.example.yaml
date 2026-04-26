@@ -37,12 +37,14 @@ jobs:
     portal: otodom
     spider_kind: slugs
     search_profile: krakow_core
+    use_db_slug_queue: true
     schedule:
-      type: cron
-      expression: "15 6 * * *"
+      type: random_daily
+      start_time: "06:00"
+      end_time: "08:30"
 
   - job_id: otodom-krakow-detail-interval
-    enabled: true
+    enabled: false
     portal: otodom
     spider_kind: detail
     search_profile: krakow_core

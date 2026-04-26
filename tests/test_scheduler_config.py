@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from scheduler.config import CronSchedule, IntervalSchedule, load_manifest_from_file
+from scheduler.config import CronSchedule, IntervalSchedule, RandomDailySchedule, load_manifest_from_file
 
 
 def test_load_manifest_from_yaml(tmp_path):
@@ -129,4 +129,59 @@ jobs:
     )
 
     with pytest.raises(ValueError, match="at least one"):
+        load_manifest_from_file(manifest_path)
+
+
+def test_load_manifest_with_random_daily_schedule(tmp_path):
+    manifest_path = tmp_path / "spider_jobs.yaml"
+    manifest_path.write_text(
+        """
+search_profiles:
+  krakow_core:
+    city: krakow
+jobs:
+  - job_id: otodom-krakow-slugs-random
+    enabled: true
+    portal: otodom
+    spider_kind: slugs
+    search_profile: krakow_core
+    use_db_slug_queue: true
+    schedule:
+      type: random_daily
+      start_time: "06:00"
+      end_time: "08:30"
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    manifest = load_manifest_from_file(manifest_path)
+
+    assert len(manifest.jobs) == 1
+    assert isinstance(manifest.jobs[0].schedule, RandomDailySchedule)
+    assert manifest.jobs[0].schedule.start_time == "06:00"
+    assert manifest.jobs[0].schedule.end_time == "08:30"
+
+
+def test_random_daily_schedule_rejects_inverted_window(tmp_path):
+    manifest_path = tmp_path / "spider_jobs.yaml"
+    manifest_path.write_text(
+        """
+search_profiles:
+  krakow_core:
+    city: krakow
+jobs:
+  - job_id: otodom-krakow-slugs-random
+    enabled: true
+    portal: otodom
+    spider_kind: slugs
+    search_profile: krakow_core
+    schedule:
+      type: random_daily
+      start_time: "08:30"
+      end_time: "06:00"
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="start_time"):
         load_manifest_from_file(manifest_path)
